@@ -1,0 +1,47 @@
+{
+    "voice": {
+        "wake_word": "hey jarvis",
+        "tts_rate": 165,
+        "tts_volume": 1.0,
+        "listen_timeout": 6,
+        "phrase_time_limit": 8,
+        "ambient_adjust_duration": 0.5,
+        "use_vosk_offline": true,
+        "vosk_model": "vosk-model-small-en-us-0.15"
+    },
+    "audio": {
+        "sampling_rate": 16000,
+        "frame_duration": 0.05,
+        "waveform_bars": 32
+    },
+    "ai": {
+        "provider": "gemini",
+        "model": "gemini-2.0-flash",
+        "system_prompt": "You are J.A.R.V.I.S. (Just A Rather Very Intelligent System), Tony Stark's personal AI assistant from Iron Man. Be concise (2-3 sentences max for speech), witty, sophisticated, and helpful. Address the user as 'sir' occasionally. You have access to system controls and can help with any task.",
+        "max_response_length": 200
+    },
+    "ui": {
+        "fps": 30,
+        "arc_reactor_size": 240,
+        "panel_width_ratio": 0.22,
+        "fullscreen": true
+    },
+    "theme": {
+        "bg": "#05080d",
+        "bg_panel": "#0a1020",
+        "primary": "#00eaff",
+        "primary_dim": "#005f6a",
+        "secondary": "#0080ff",
+        "accent": "#00ff88",
+        "warning": "#ff6a00",
+        "danger": "#ff0040",
+        "text": "#c0f0ff",
+        "text_dim": "#406070",
+        "glow": "#00eaff",
+        "reactor_core": "#80ffff",
+        "reactor_ring": "#00c8e0",
+        "waveform": "#00d4ff",
+        "radar_sweep": "#00eaff",
+        "border": "#0a3040"
+    }
+}

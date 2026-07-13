@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment & secrets
+.env
+*.env
+
+# Logs
+logs/
+*.log
+
+# Data
+data/screenshots/
+
+# OS files
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Vosk model (large binary — download separately)
+model/
+
+# Agents
+.agents/
