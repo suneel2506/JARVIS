@@ -13,6 +13,7 @@ google-genai>=1.0.0        # Google Gemini SDK (new)
 
 # ─── System Monitoring ──────────────────────────────────
 psutil>=5.9.0              # CPU, RAM, battery, disk, network
+GPUtil>=1.4.0              # NVIDIA GPU monitoring (optional)
 
 # ─── Automation ──────────────────────────────────────────
 keyboard>=0.13.5           # Global hotkeys & media keys

@@ -134,6 +134,106 @@ def set_brightness(level: int) -> tuple[bool, str]:
         return False, "Couldn't adjust brightness. This might not be supported on your device."
 
 
+def get_gpu_usage() -> tuple[bool, str]:
+    """Get GPU usage if available."""
+    # Try GPUtil (NVIDIA)
+    try:
+        import GPUtil
+        gpus = GPUtil.getGPUs()
+        if gpus:
+            gpu = gpus[0]
+            return True, (f"GPU: {gpu.name}, Load: {gpu.load * 100:.0f}%, "
+                         f"Memory: {gpu.memoryUsed:.0f}MB/{gpu.memoryTotal:.0f}MB, "
+                         f"Temperature: {gpu.temperature}°C")
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # Try WMI fallback (Windows)
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["wmic", "path", "win32_videocontroller", "get", "name,adapterram"],
+            capture_output=True, text=True, timeout=5,
+        )
+        lines = [l.strip() for l in result.stdout.strip().split('\n') if l.strip() and 'Name' not in l]
+        if lines:
+            return True, f"GPU: {lines[0]}"
+    except Exception:
+        pass
+
+    return True, "GPU information not available. Install GPUtil for NVIDIA monitoring."
+
+
+def get_cpu_temperature() -> tuple[bool, str]:
+    """Get CPU temperature if available."""
+    try:
+        import psutil
+        temps = psutil.sensors_temperatures()
+        if temps:
+            for name, entries in temps.items():
+                for entry in entries:
+                    if entry.current > 0:
+                        return True, f"CPU temperature: {entry.current:.0f}°C"
+    except Exception:
+        pass
+
+    # WMI fallback for Windows
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["wmic", "/namespace:\\\\root\\wmi", "PATH", "MSAcpi_ThermalZoneTemperature",
+             "get", "CurrentTemperature"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.strip().split('\n'):
+            line = line.strip()
+            if line.isdigit():
+                temp_c = (int(line) - 2732) / 10.0
+                return True, f"CPU temperature: {temp_c:.0f}°C"
+    except Exception:
+        pass
+
+    return True, "Temperature monitoring not available on this system"
+
+
+def get_uptime() -> tuple[bool, str]:
+    """Get system uptime."""
+    try:
+        import psutil
+        boot_time = psutil.boot_time()
+        import time
+        uptime_seconds = time.time() - boot_time
+        hours = int(uptime_seconds // 3600)
+        minutes = int((uptime_seconds % 3600) // 60)
+        if hours > 24:
+            days = hours // 24
+            hours = hours % 24
+            return True, f"System has been running for {days} days, {hours} hours, {minutes} minutes"
+        return True, f"System has been running for {hours} hours and {minutes} minutes"
+    except Exception as e:
+        return False, f"Couldn't get uptime: {e}"
+
+
+def list_drives() -> tuple[bool, str]:
+    """List available drives with sizes."""
+    try:
+        import psutil
+        drives = []
+        for part in psutil.disk_partitions():
+            try:
+                usage = psutil.disk_usage(part.mountpoint)
+                total_gb = usage.total / (1024 ** 3)
+                free_gb = usage.free / (1024 ** 3)
+                drives.append(f"{part.device} ({total_gb:.0f}GB total, {free_gb:.0f}GB free)")
+            except (PermissionError, OSError):
+                drives.append(f"{part.device}")
+        return True, "Drives: " + ", ".join(drives)
+    except Exception as e:
+        return False, f"Couldn't list drives: {e}"
+
+
 def handle_system_command(command: str) -> tuple[bool, bool, str]:
     """
     Route system-related commands.
@@ -173,7 +273,7 @@ def handle_system_command(command: str) -> tuple[bool, bool, str]:
         ok, msg = get_battery_status()
         return True, ok, msg
 
-    if "cpu" in cmd and ("usage" in cmd or "how much" in cmd or "check" in cmd):
+    if "cpu" in cmd and ("usage" in cmd or "how much" in cmd or "check" in cmd or "status" in cmd):
         ok, msg = get_cpu_usage()
         return True, ok, msg
 
@@ -187,6 +287,26 @@ def handle_system_command(command: str) -> tuple[bool, bool, str]:
 
     if "internet" in cmd and ("status" in cmd or "check" in cmd or "connection" in cmd):
         ok, msg = get_internet_status()
+        return True, ok, msg
+
+    # GPU
+    if "gpu" in cmd and ("usage" in cmd or "status" in cmd or "info" in cmd or cmd.strip() == "gpu"):
+        ok, msg = get_gpu_usage()
+        return True, ok, msg
+
+    # Temperature
+    if "temperature" in cmd or "cpu temp" in cmd or "how hot" in cmd:
+        ok, msg = get_cpu_temperature()
+        return True, ok, msg
+
+    # Uptime
+    if "uptime" in cmd or "how long" in cmd and ("running" in cmd or "on" in cmd):
+        ok, msg = get_uptime()
+        return True, ok, msg
+
+    # Drives
+    if "list drives" in cmd or "show drives" in cmd or "drives" in cmd:
+        ok, msg = list_drives()
         return True, ok, msg
 
     # Brightness
@@ -205,3 +325,4 @@ def handle_system_command(command: str) -> tuple[bool, bool, str]:
             return True, ok, msg
 
     return False, False, ""
+

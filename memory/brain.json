@@ -5,7 +5,15 @@
     "notes": [],
     "user_name": "sir",
     "commands": {},
-    "usage": {},
+    "usage": {
+        "open cmd": 1,
+        "open youtube": 2,
+        "what is mean by uno": 1,
+        "but": 1,
+        "the": 1,
+        "create the folder name of sunil demo in the document section": 1,
+        "create folder": 1
+    },
     "routines": {},
     "schedules": [],
     "hotkeys": {}

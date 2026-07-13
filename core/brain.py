@@ -169,3 +169,24 @@ def get_top_commands(limit: int = 5) -> list[tuple[str, int]]:
     usage = get_brain().get("usage", {})
     sorted_cmds = sorted(usage.items(), key=lambda x: x[1], reverse=True)
     return sorted_cmds[:limit]
+
+
+def get_brain_data() -> dict:
+    """
+    Get brain data merged with memory data for AI context injection.
+    Returns a combined dict with facts, preferences, aliases, and brain data.
+    """
+    brain = get_brain()
+    result = dict(brain)
+
+    # Merge in memory data if available
+    try:
+        from core.memory import get_facts, get_preferences
+        result["facts"] = get_facts()
+        result["preferences"] = get_preferences()
+    except Exception:
+        result.setdefault("facts", {})
+        result.setdefault("preferences", {})
+
+    return result
+

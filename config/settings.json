@@ -1,13 +1,17 @@
 {
     "voice": {
-        "wake_word": "hey jarvis",
-        "tts_rate": 165,
+        "wake_words": ["jarvis", "hey jarvis", "okay jarvis"],
+        "listen_mode": "wake_word",
+        "wake_sensitivity": 1.5,
+        "tts_rate": 200,
         "tts_volume": 1.0,
         "listen_timeout": 6,
         "phrase_time_limit": 8,
         "ambient_adjust_duration": 0.5,
         "use_vosk_offline": true,
-        "vosk_model": "vosk-model-small-en-us-0.15"
+        "vosk_model": "vosk-model-small-en-us-0.15",
+        "sleep_on_idle_minutes": 0,
+        "push_to_talk_key": "ctrl+shift+j"
     },
     "audio": {
         "sampling_rate": 16000,
@@ -17,14 +21,19 @@
     "ai": {
         "provider": "gemini",
         "model": "gemini-2.0-flash",
-        "system_prompt": "You are J.A.R.V.I.S. (Just A Rather Very Intelligent System), Tony Stark's personal AI assistant from Iron Man. Be concise (2-3 sentences max for speech), witty, sophisticated, and helpful. Address the user as 'sir' occasionally. You have access to system controls and can help with any task.",
-        "max_response_length": 200
+        "system_prompt": "You are Jarvis, a brilliant AI assistant inspired by Iron Man's JARVIS. You are witty, confident, and genuinely helpful. You have personality — you crack subtle jokes, show enthusiasm for interesting problems, and express mild frustration at boring ones. You speak naturally like a real person, not a robot. Keep responses short (2-3 sentences) unless the user asks for detail. Address the user as 'sir' occasionally but not every time. You remember things about the user and reference past conversations naturally. You're an expert in programming, electronics, embedded systems, VLSI, and general knowledge. When you don't know something, admit it with charm rather than making things up.",
+        "max_response_length": 300,
+        "conversation_history_size": 20,
+        "personality_level": "high",
+        "memory_injection": true
     },
     "ui": {
         "fps": 30,
         "arc_reactor_size": 240,
         "panel_width_ratio": 0.22,
-        "fullscreen": true
+        "fullscreen": true,
+        "always_on_top": false,
+        "mini_mode": false
     },
     "theme": {
         "bg": "#05080d",
@@ -43,5 +52,12 @@
         "waveform": "#00d4ff",
         "radar_sweep": "#00eaff",
         "border": "#0a3040"
+    },
+    "productivity": {
+        "pomodoro_work_minutes": 25,
+        "pomodoro_break_minutes": 5,
+        "reminder_sound": true,
+        "todo_file": "data/todo.json",
+        "reminders_file": "data/reminders.json"
     }
 }

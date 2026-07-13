@@ -5,21 +5,26 @@ Routes voice/text commands through all handler modules in priority order,
 with memory-aware AI fallback for unrecognized commands.
 
 Command priority:
-1. Exit / Quit
-2. Routine commands (run, list, delete)
-3. AI & Memory commands (remember, recall, notes, ask)
-4. App launch commands (open, launch, start, close)
-5. Browser navigation (google, youtube, github, wiki)
-6. Media control (play, pause, next, volume)
-7. System commands (shutdown, restart, battery, cpu)
-8. Automation (screenshot, type, press)
-9. File management (create folder, rename, delete)
-10. Smart queries (time, date, weather, jokes)
-11. Web search fallback
-12. Custom user-taught commands
-13. Memory recall (check if question matches stored facts)
-14. AI conversation fallback
-15. Unknown command
+1. Exit / Quit / Sleep Mode
+2. Listen mode switching
+3. Routine commands (run, list, delete)
+4. AI & Memory commands (remember, recall, notes, ask)
+5. Productivity (reminders, timers, to-do, pomodoro)
+6. Coding (git, run script, create project)
+7. App launch commands (open, launch, start, close)
+8. Communication apps (whatsapp, discord, gmail, etc.)
+9. Browser navigation (google, youtube, github, wiki)
+10. Media control (play, pause, next, volume)
+11. System commands (shutdown, restart, battery, cpu, gpu)
+12. Automation (screenshot, type, press)
+13. Utilities (recycle bin, processes, compress, speed test)
+14. File management (create folder, rename, delete, copy)
+15. Smart queries (time, date, weather, news, translate)
+16. Web search fallback
+17. Custom user-taught commands
+18. Memory recall
+19. AI conversation fallback
+20. Unknown command
 """
 import time
 import threading
@@ -84,6 +89,34 @@ def execute(command: str) -> str | None:
         _add_log_entry(cmd, "Shutting down")
         return "exit"
 
+    # ─── 1b. Sleep / Wake mode ──────────────────────────
+    if cmd in ("go to sleep", "sleep mode", "jarvis sleep"):
+        from core.listener import enter_sleep
+        enter_sleep()
+        speak("Entering sleep mode. Say 'wake up' or click to reactivate.")
+        _add_log_entry(cmd, "Sleep mode")
+        return None
+    if cmd in ("wake up", "i'm back", "jarvis wake up"):
+        from core.listener import exit_sleep
+        exit_sleep()
+        speak("I'm awake, sir. What do you need?")
+        _add_log_entry(cmd, "Woke up")
+        return None
+
+    # ─── 1c. Listen mode switching ──────────────────────
+    if "continuous mode" in cmd or "always listen" in cmd:
+        from core.listener import set_listen_mode
+        set_listen_mode("continuous")
+        speak("Switching to continuous listening mode. No wake word needed.")
+        _add_log_entry(cmd, "Continuous mode")
+        return None
+    if "wake word mode" in cmd or "normal mode" in cmd:
+        from core.listener import set_listen_mode
+        set_listen_mode("wake_word")
+        speak("Switching to wake word mode.")
+        _add_log_entry(cmd, "Wake word mode")
+        return None
+
     # ─── 2. Routine commands ────────────────────────────
     if cmd.startswith("run routine "):
         name = cmd.replace("run routine ", "").strip()
@@ -119,6 +152,14 @@ def execute(command: str) -> str | None:
         _add_log_entry(cmd, msg)
         return None
 
+    # ─── 2b. Workflow commands ──────────────────────────
+    from core.workflow import handle_workflow_command, is_chained_command
+    handled, msg = handle_workflow_command(cmd, execute)
+    if handled:
+        speak(msg)
+        _add_log_entry(cmd, msg)
+        return None
+
     # ─── 3. AI & Memory commands ────────────────────────
     from commands.ai import handle_ai_command
     handled, ok, msg = handle_ai_command(cmd)
@@ -127,20 +168,45 @@ def execute(command: str) -> str | None:
         _add_log_entry(cmd, msg)
         return None
 
-    # ─── 4. App launch commands ─────────────────────────
+    # ─── 4. Productivity commands ───────────────────────
+    from commands.productivity import handle_productivity_command
+    handled, ok, msg = handle_productivity_command(cmd)
+    if handled:
+        speak(msg)
+        _add_log_entry(cmd, msg)
+        return None
+
+    # ─── 5. Coding commands ─────────────────────────────
+    from commands.coding import handle_coding_command
+    handled, ok, msg = handle_coding_command(cmd)
+    if handled:
+        speak(msg)
+        _add_log_entry(cmd, msg)
+        return None
+
+    # ─── 6. App launch commands ─────────────────────────
     if any(cmd.startswith(p) for p in ("open ", "launch ", "start ", "close ")):
         if cmd.startswith("close "):
             from commands.apps import close_app
             app_name = cmd.replace("close ", "").strip()
             ok, msg = close_app(app_name)
         else:
-            # Try browser sites first
+            # Try communication apps first
+            from commands.communication import handle_communication_command
+            handled, ok, msg = handle_communication_command(cmd)
+            if handled:
+                speak(msg)
+                _add_log_entry(cmd, msg)
+                return None
+
+            # Then try browser sites
             from commands.browser import handle_browser_command
             handled, ok, msg = handle_browser_command(cmd)
             if handled:
                 speak(msg)
                 _add_log_entry(cmd, msg)
                 return None
+
             # Then try app launcher
             from commands.apps import handle_open
             ok, msg = handle_open(cmd)
@@ -148,7 +214,15 @@ def execute(command: str) -> str | None:
         _add_log_entry(cmd, msg)
         return None
 
-    # ─── 5. Browser navigation ──────────────────────────
+    # ─── 7. Communication apps (without "open" prefix) ──
+    from commands.communication import handle_communication_command
+    handled, ok, msg = handle_communication_command(cmd)
+    if handled:
+        speak(msg)
+        _add_log_entry(cmd, msg)
+        return None
+
+    # ─── 8. Browser navigation ──────────────────────────
     from commands.browser import handle_browser_command
     handled, ok, msg = handle_browser_command(cmd)
     if handled:
@@ -156,7 +230,7 @@ def execute(command: str) -> str | None:
         _add_log_entry(cmd, msg)
         return None
 
-    # ─── 6. Media control ──────────────────────────────
+    # ─── 9. Media control ──────────────────────────────
     from commands.media import handle_media_command
     handled, ok, msg = handle_media_command(cmd)
     if handled:
@@ -164,7 +238,7 @@ def execute(command: str) -> str | None:
         _add_log_entry(cmd, msg)
         return None
 
-    # ─── 7. System commands ─────────────────────────────
+    # ─── 10. System commands ─────────────────────────────
     from commands.system import handle_system_command
     handled, ok, msg = handle_system_command(cmd)
     if handled:
@@ -172,7 +246,7 @@ def execute(command: str) -> str | None:
         _add_log_entry(cmd, msg)
         return None
 
-    # ─── 8. Automation commands ─────────────────────────
+    # ─── 11. Automation commands ─────────────────────────
     from commands.automation import handle_automation_command
     handled, ok, msg = handle_automation_command(cmd)
     if handled:
@@ -180,7 +254,15 @@ def execute(command: str) -> str | None:
         _add_log_entry(cmd, msg)
         return None
 
-    # ─── 9. File management ────────────────────────────
+    # ─── 12. Utility commands ───────────────────────────
+    from commands.utilities import handle_utility_command
+    handled, ok, msg = handle_utility_command(cmd)
+    if handled:
+        speak(msg)
+        _add_log_entry(cmd, msg)
+        return None
+
+    # ─── 13. File management ────────────────────────────
     from commands.files import handle_file_command
     handled, ok, msg = handle_file_command(cmd)
     if handled:
@@ -188,7 +270,7 @@ def execute(command: str) -> str | None:
         _add_log_entry(cmd, msg)
         return None
 
-    # ─── 10. Smart queries ──────────────────────────────
+    # ─── 14. Smart queries ──────────────────────────────
     from commands.smart import handle_smart_command
     handled, ok, msg = handle_smart_command(cmd)
     if handled:
@@ -196,7 +278,7 @@ def execute(command: str) -> str | None:
         _add_log_entry(cmd, msg)
         return None
 
-    # ─── 11. Web search fallback ────────────────────────
+    # ─── 15. Web search fallback ────────────────────────
     from commands.web import handle_web_command
     handled, ok, msg = handle_web_command(cmd)
     if handled:
@@ -204,7 +286,7 @@ def execute(command: str) -> str | None:
         _add_log_entry(cmd, msg)
         return None
 
-    # ─── 12. Custom commands ────────────────────────────
+    # ─── 16. Custom commands ────────────────────────────
     from commands.custom import execute_custom
     handled, ok, msg = execute_custom(cmd)
     if handled:
@@ -212,7 +294,15 @@ def execute(command: str) -> str | None:
         _add_log_entry(cmd, msg)
         return None
 
-    # ─── 13. Memory recall ──────────────────────────────
+    # ─── 16b. Plugin commands ───────────────────────────
+    from core.plugin_manager import handle_plugin_commands
+    handled, ok, msg = handle_plugin_commands(cmd)
+    if handled:
+        speak(msg)
+        _add_log_entry(cmd, msg)
+        return None
+
+    # ─── 17. Memory recall ──────────────────────────────
     try:
         from commands.ai import handle_recall
         found, answer = handle_recall(command)
@@ -223,7 +313,7 @@ def execute(command: str) -> str | None:
     except Exception as e:
         log.error("Memory recall error: %s", e)
 
-    # ─── 14. AI conversation fallback ───────────────────
+    # ─── 18. AI conversation fallback ───────────────────
     try:
         from core.ai_engine import is_available, ask
         if is_available():
@@ -235,7 +325,7 @@ def execute(command: str) -> str | None:
     except Exception as e:
         log.error("AI fallback error: %s", e)
 
-    # ─── 15. Unknown command ───────────────────────────
+    # ─── 19. Unknown command ───────────────────────────
     speak("I'm not sure how to handle that command, sir.")
     _add_log_entry(cmd, "Unrecognized command")
     return None

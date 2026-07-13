@@ -76,6 +76,11 @@ def main():
     # Initialize AI
     init_ai()
 
+    # Load plugins
+    from core.plugin_manager import load_all_plugins
+    plugin_count = load_all_plugins()
+    log.info("Loaded %d plugin(s)", plugin_count)
+
     # Start speaker
     start_speaker()
 
@@ -99,6 +104,13 @@ def main():
         hud.add_conversation("You", cmd)
         hud.add_radar_blip()
         result = execute(cmd)
+        # Show JARVIS response in conversation
+        from core.executor import get_command_log
+        recent = get_command_log()
+        if recent:
+            last_response = recent[-1].get("response", "")
+            if last_response:
+                hud.add_conversation("Jarvis", last_response)
         return result
 
     def on_text_command(text):

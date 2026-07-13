@@ -6,11 +6,13 @@ Features:
 - Arc reactor with state-driven animations
 - Voice waveform visualization
 - Radar sweep with command blips
-- System diagnostics panel (CPU, RAM, Battery, Disk, Network)
+- System diagnostics panel (CPU, RAM, GPU, Battery, Disk, Network, Speed, Ping)
 - Activity log panel
 - Text input bar for typed commands
 - Toast notification system
 - Conversation display
+- Floating holographic particles
+- Keyboard shortcuts (F11 fullscreen, F10 mini mode, F9 always-on-top)
 """
 import tkinter as tk
 import time
@@ -25,14 +27,15 @@ from ui.top_bar import TopBar
 from ui.side_panels import SystemPanel, LogPanel
 from ui.waveform import Waveform
 from ui.radar import Radar
+from ui.particles import ParticleSystem
 
 
 class JarvisHUD(tk.Tk):
     """
     Main application window — fullscreen Iron Man-style HUD.
 
-    Manages the animation loop, UI components, text input, and notification
-    system. All backend interaction is through callbacks.
+    Manages the animation loop, UI components, text input, notification
+    system, and particle effects. All backend interaction is through callbacks.
     """
 
     def __init__(self) -> None:
@@ -45,9 +48,17 @@ class JarvisHUD(tk.Tk):
         self.bind('<Escape>', lambda e: self._on_close())
         self.bind('<Button-1>', self._on_click)
 
+        # Keyboard shortcuts
+        self.bind('<F11>', self._toggle_fullscreen)
+        self.bind('<F10>', self._toggle_mini_mode)
+        self.bind('<F9>', self._toggle_always_on_top)
+
         # Screen dimensions
         self.w: int = self.winfo_screenwidth()
         self.h: int = self.winfo_screenheight()
+        self._is_fullscreen: bool = True
+        self._is_mini: bool = False
+        self._is_on_top: bool = False
 
         # Main canvas
         self.canvas = tk.Canvas(
@@ -79,6 +90,9 @@ class JarvisHUD(tk.Tk):
         self.log_panel = LogPanel(self.canvas, self.w - panel_w - 20, 110, panel_w, panel_h)
         self.radar = Radar(self.canvas, 140, self.h - 120, radius=60)
 
+        # Particle system
+        self.particles = ParticleSystem(self.canvas, self.w, self.h, max_particles=35)
+
         # ─── Text Input Bar ─────────────────────────────
         self._input_frame = tk.Frame(self, bg="#0a1525", bd=0, highlightthickness=0)
         self._input_frame.place(
@@ -98,7 +112,7 @@ class JarvisHUD(tk.Tk):
         )
         self._input_entry.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 5), pady=5)
         self._input_entry.bind('<Return>', self._on_text_submit)
-        self._input_entry.bind('<FocusIn>', lambda e: None)  # Prevent canvas click passthrough
+        self._input_entry.bind('<FocusIn>', lambda e: None)
 
         # Send button
         self._send_btn = tk.Button(
@@ -128,7 +142,7 @@ class JarvisHUD(tk.Tk):
         # Bottom decorative text
         self.canvas.create_text(
             center_x, self.h - 12,
-            text="J.A.R.V.I.S. — Just A Rather Very Intelligent System  │  ESC to exit  │  Click or type to interact",
+            text="J.A.R.V.I.S. — Just A Rather Very Intelligent System  │  F11 Fullscreen  │  F10 Mini  │  F9 Pin  │  ESC Exit",
             fill=TEXT_DIM, font=("Consolas", 8),
         )
 
@@ -160,7 +174,6 @@ class JarvisHUD(tk.Tk):
 
     def _on_click(self, event: tk.Event) -> None:
         """Handle canvas click — activate voice listening."""
-        # Don't activate if clicking on the input bar
         if event.widget != self.canvas:
             return
         if self._on_click_callback:
@@ -198,6 +211,42 @@ class JarvisHUD(tk.Tk):
         self._running = False
         self.destroy()
 
+    # ─── Keyboard Shortcuts ─────────────────────────────
+
+    def _toggle_fullscreen(self, event=None) -> None:
+        """Toggle fullscreen mode."""
+        self._is_fullscreen = not self._is_fullscreen
+        self.attributes('-fullscreen', self._is_fullscreen)
+        if not self._is_fullscreen:
+            self.geometry("1280x720")
+        self.show_notification(
+            "Fullscreen ON" if self._is_fullscreen else "Windowed mode",
+            "info",
+        )
+
+    def _toggle_mini_mode(self, event=None) -> None:
+        """Toggle mini floating mode (small window with just reactor + input)."""
+        self._is_mini = not self._is_mini
+        if self._is_mini:
+            self.attributes('-fullscreen', False)
+            self.geometry("400x200")
+            self.attributes('-topmost', True)
+            self.show_notification("Mini mode — F10 to expand", "info")
+        else:
+            self.attributes('-fullscreen', True)
+            self.attributes('-topmost', self._is_on_top)
+            self._is_fullscreen = True
+            self.show_notification("Full HUD restored", "info")
+
+    def _toggle_always_on_top(self, event=None) -> None:
+        """Toggle always-on-top."""
+        self._is_on_top = not self._is_on_top
+        self.attributes('-topmost', self._is_on_top)
+        self.show_notification(
+            "Pinned on top" if self._is_on_top else "Unpinned",
+            "info",
+        )
+
     # ─── Animation Loop ─────────────────────────────────
 
     def start_animation(self) -> None:
@@ -216,9 +265,11 @@ class JarvisHUD(tk.Tk):
         # Update components
         self.arc_reactor.update(dt)
         self.radar.update(dt)
+        self.particles.update(dt)
 
         # Draw everything
         try:
+            self.particles.draw()  # Draw particles first (background layer)
             self.top_bar.draw()
             self.arc_reactor.draw()
             self.waveform.draw()
@@ -243,6 +294,7 @@ class JarvisHUD(tk.Tk):
         """Update the HUD state (idle, listening, processing, speaking)."""
         self.arc_reactor.set_state(state)
         self.waveform.set_active(state in ("listening", "active_listening"))
+        self.particles.set_state(state)
         status_map = {
             "idle": "SYSTEM ONLINE — STANDBY",
             "wake_listening": "SYSTEM ONLINE — STANDBY",
@@ -250,6 +302,7 @@ class JarvisHUD(tk.Tk):
             "active_listening": "● ACTIVE LISTENING",
             "processing": "⚡ PROCESSING COMMAND",
             "speaking": "◆ RESPONDING",
+            "sleeping": "○ SLEEP MODE",
         }
         self.top_bar.set_status(status_map.get(state, "SYSTEM ONLINE"))
 
@@ -342,7 +395,7 @@ class JarvisHUD(tk.Tk):
 
         cx = self.w // 2
         base_y = self.waveform.cy + 50
-        entries = list(self._conversation)[-4:]  # Show last 4
+        entries = list(self._conversation)[-4:]
 
         for i, entry in enumerate(entries):
             y = base_y + i * 22

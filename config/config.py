@@ -16,10 +16,11 @@ BRAIN_FILE: str = os.path.join(BASE_DIR, "memory", "brain.json")
 MEMORY_FILE: str = os.path.join(BASE_DIR, "memory", "brain.json")
 SCREENSHOT_DIR: str = os.path.join(BASE_DIR, "data", "screenshots")
 LOG_DIR: str = os.path.join(BASE_DIR, "logs")
+DATA_DIR: str = os.path.join(BASE_DIR, "data")
 VOSK_MODEL_PATH: str = os.path.join(BASE_DIR, "model", "vosk-model-small-en-us-0.15")
 
 # Ensure directories exist
-for _dir in (SCREENSHOT_DIR, LOG_DIR, os.path.join(BASE_DIR, "memory")):
+for _dir in (SCREENSHOT_DIR, LOG_DIR, DATA_DIR, os.path.join(BASE_DIR, "memory")):
     os.makedirs(_dir, exist_ok=True)
 
 
@@ -42,14 +43,19 @@ OLLAMA_HOST: str = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
 # ─── Voice Settings ──────────────────────────────────────
 _voice = _settings.get("voice", {})
-WAKE_WORD: str = _voice.get("wake_word", "hey jarvis")
-TTS_RATE: int = _voice.get("tts_rate", 165)
+WAKE_WORD: str = _voice.get("wake_words", ["hey jarvis"])[0]  # Primary for backward compat
+WAKE_WORDS: list[str] = _voice.get("wake_words", ["jarvis", "hey jarvis", "okay jarvis"])
+LISTEN_MODE: str = _voice.get("listen_mode", "wake_word")  # wake_word, continuous, push_to_talk
+WAKE_SENSITIVITY: float = _voice.get("wake_sensitivity", 1.5)
+TTS_RATE: int = _voice.get("tts_rate", 200)
 TTS_VOLUME: float = _voice.get("tts_volume", 1.0)
 LISTEN_TIMEOUT: int = _voice.get("listen_timeout", 6)
 PHRASE_TIME_LIMIT: int = _voice.get("phrase_time_limit", 8)
 AMBIENT_ADJUST_DURATION: float = _voice.get("ambient_adjust_duration", 0.5)
 USE_VOSK_OFFLINE: bool = _voice.get("use_vosk_offline", True)
 VOSK_MODEL_NAME: str = _voice.get("vosk_model", "vosk-model-small-en-us-0.15")
+SLEEP_ON_IDLE_MINUTES: int = _voice.get("sleep_on_idle_minutes", 0)
+PUSH_TO_TALK_KEY: str = _voice.get("push_to_talk_key", "ctrl+shift+j")
 
 # ─── Audio / Waveform ───────────────────────────────────
 _audio = _settings.get("audio", {})
@@ -63,13 +69,14 @@ AI_PROVIDER: str = _ai.get("provider", "gemini")
 AI_MODEL: str = _ai.get("model", "gemini-2.0-flash")
 AI_SYSTEM_PROMPT: str = _ai.get(
     "system_prompt",
-    "You are J.A.R.V.I.S. (Just A Rather Very Intelligent System), "
-    "Tony Stark's personal AI assistant from Iron Man. "
-    "Be concise (2-3 sentences max for speech), witty, sophisticated, and helpful. "
-    "Address the user as 'sir' occasionally. "
-    "You have access to system controls and can help with any task.",
+    "You are Jarvis, a brilliant AI assistant inspired by Iron Man's JARVIS. "
+    "You are witty, confident, and genuinely helpful. Keep responses short (2-3 sentences) "
+    "unless asked for detail. Address the user as 'sir' occasionally.",
 )
-AI_MAX_RESPONSE_LENGTH: int = _ai.get("max_response_length", 200)
+AI_MAX_RESPONSE_LENGTH: int = _ai.get("max_response_length", 300)
+AI_CONVERSATION_HISTORY_SIZE: int = _ai.get("conversation_history_size", 20)
+AI_PERSONALITY_LEVEL: str = _ai.get("personality_level", "high")
+AI_MEMORY_INJECTION: bool = _ai.get("memory_injection", True)
 
 # ─── UI / HUD ───────────────────────────────────────────
 _ui = _settings.get("ui", {})
@@ -77,6 +84,15 @@ HUD_FPS: int = _ui.get("fps", 30)
 ARC_REACTOR_SIZE: int = _ui.get("arc_reactor_size", 240)
 PANEL_WIDTH_RATIO: float = _ui.get("panel_width_ratio", 0.22)
 HUD_FULLSCREEN: bool = _ui.get("fullscreen", True)
+HUD_ALWAYS_ON_TOP: bool = _ui.get("always_on_top", False)
+HUD_MINI_MODE: bool = _ui.get("mini_mode", False)
+
+# ─── Productivity ───────────────────────────────────────
+_prod = _settings.get("productivity", {})
+POMODORO_WORK_MINUTES: int = _prod.get("pomodoro_work_minutes", 25)
+POMODORO_BREAK_MINUTES: int = _prod.get("pomodoro_break_minutes", 5)
+TODO_FILE: str = os.path.join(BASE_DIR, _prod.get("todo_file", "data/todo.json"))
+REMINDERS_FILE: str = os.path.join(BASE_DIR, _prod.get("reminders_file", "data/reminders.json"))
 
 # ─── Theme (Iron Man Cyan) ──────────────────────────────
 _theme_data = _settings.get("theme", {})
