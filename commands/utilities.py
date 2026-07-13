@@ -252,11 +252,14 @@ def record_audio(duration: int = 10) -> tuple[bool, str]:
 def show_clipboard() -> tuple[bool, str]:
     """Show current clipboard content."""
     try:
-        import tkinter as tk
-        root = tk.Tk()
-        root.withdraw()
-        content = root.clipboard_get()
-        root.destroy()
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication([])
+        clipboard = app.clipboard()
+        content = clipboard.text()
+        if not content:
+            return True, "Clipboard is empty or contains non-text content"
         if len(content) > 200:
             content = content[:200] + "..."
         return True, f"Clipboard contains: {content}"
@@ -267,11 +270,12 @@ def show_clipboard() -> tuple[bool, str]:
 def clear_clipboard() -> tuple[bool, str]:
     """Clear the clipboard."""
     try:
-        import tkinter as tk
-        root = tk.Tk()
-        root.withdraw()
-        root.clipboard_clear()
-        root.destroy()
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication([])
+        clipboard = app.clipboard()
+        clipboard.clear()
         return True, "Clipboard cleared"
     except Exception as e:
         return False, f"Couldn't clear clipboard: {e}"

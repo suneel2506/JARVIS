@@ -9,7 +9,9 @@ Supports three listen modes:
 - continuous: Always listening — every phrase is treated as a command
 - push_to_talk: Only activates via manual trigger (UI click or hotkey)
 
-Wake words are matched as substrings: "jarvis", "hey jarvis", "okay jarvis"
+Wake word detection backends:
+- OpenWakeWord (preferred): Neural network, low CPU, dedicated audio stream
+- Vosk substring matching (fallback): Transcribes then matches keywords
 """
 import threading
 import time
@@ -231,13 +233,10 @@ def _recognize_audio(recognizer: sr.Recognizer, audio: sr.AudioData) -> str:
 
 
 def _matches_wake_word(text: str) -> bool:
-    """Check if text contains any registered wake word."""
-    from config.config import WAKE_WORDS
-    text_lower = text.lower().strip()
-    for wake_word in WAKE_WORDS:
-        if wake_word in text_lower:
-            return True
-    return False
+    """Check if text contains any registered wake word.
+    Uses the wake_word module which handles both OpenWakeWord and fallback."""
+    from core.wake_word import detect_from_text
+    return detect_from_text(text)
 
 
 # ─── Immortal Wake-Word Detection Loop ──────────────────
@@ -426,6 +425,22 @@ def start_listener() -> None:
 
     _init_vosk()
     start_audio_stream()
+
+    # Initialize wake word engine (OpenWakeWord or Vosk fallback)
+    from core.wake_word import init_wake_engine, is_openwakeword, start_stream, set_on_wake
+    init_wake_engine()
+
+    # If OpenWakeWord is active, wire its detection to the wake event
+    if is_openwakeword():
+        def _oww_wake_callback():
+            if not sleep_event.is_set() and not listening_event.is_set():
+                log.info("OpenWakeWord triggered wake event")
+                wake_event.set()
+        set_on_wake(_oww_wake_callback)
+        start_stream()
+        log.info("Using OpenWakeWord for wake detection")
+    else:
+        log.info("Using Vosk substring matching for wake detection")
 
     threading.Thread(target=_wake_loop, daemon=True, name="WakeLoop").start()
     threading.Thread(target=_command_capture_loop, daemon=True, name="CommandCapture").start()

@@ -1,6 +1,10 @@
 """
 ui/colors.py — Iron Man HUD color theme and glow utilities.
+
+Works with both tkinter hex strings and QColor objects.
+All color constants remain hex strings for backward compatibility.
 """
+from typing import Union
 
 # ─── Iron Man JARVIS Cyan Theme ─────────────────────────
 BG              = "#05080d"       # Deep space black
@@ -36,18 +40,18 @@ BORDER_BRIGHT   = "#00a0c0"       # Bright borders
 GRID            = "#081520"       # Grid lines on panels
 
 
-def hex_to_rgb(hex_color):
+def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
     """Convert hex color to (r, g, b) tuple."""
     hex_color = hex_color.lstrip('#')
     return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
 
 
-def rgb_to_hex(r, g, b):
+def rgb_to_hex(r: float, g: float, b: float) -> str:
     """Convert (r, g, b) to hex color string."""
     return f"#{int(r):02x}{int(g):02x}{int(b):02x}"
 
 
-def lerp_color(color1, color2, t):
+def lerp_color(color1: str, color2: str, t: float) -> str:
     """Linearly interpolate between two hex colors. t=0→color1, t=1→color2."""
     r1, g1, b1 = hex_to_rgb(color1)
     r2, g2, b2 = hex_to_rgb(color2)
@@ -58,13 +62,19 @@ def lerp_color(color1, color2, t):
     return rgb_to_hex(r, g, b)
 
 
-def dim_color(hex_color, factor=0.5):
+def dim_color(hex_color: str, factor: float = 0.5) -> str:
     """Dim a color by a factor (0=black, 1=original)."""
     r, g, b = hex_to_rgb(hex_color)
     return rgb_to_hex(r * factor, g * factor, b * factor)
 
 
-def brighten_color(hex_color, factor=1.3):
+def brighten_color(hex_color: str, factor: float = 1.3) -> str:
     """Brighten a color by a factor."""
     r, g, b = hex_to_rgb(hex_color)
     return rgb_to_hex(min(255, r * factor), min(255, g * factor), min(255, b * factor))
+
+
+def to_qcolor(hex_color: str):
+    """Convert hex string to QColor (imported lazily for tkinter compat)."""
+    from PySide6.QtGui import QColor
+    return QColor(hex_color)

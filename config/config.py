@@ -3,6 +3,8 @@ config/config.py — Central configuration for J.A.R.V.I.S.
 
 Loads settings from settings.json with environment variable overrides.
 All paths, API keys, theme colors, and tunable parameters are defined here.
+
+Settings priority: Environment variables > settings.json > defaults
 """
 import os
 import json
@@ -18,9 +20,13 @@ SCREENSHOT_DIR: str = os.path.join(BASE_DIR, "data", "screenshots")
 LOG_DIR: str = os.path.join(BASE_DIR, "logs")
 DATA_DIR: str = os.path.join(BASE_DIR, "data")
 VOSK_MODEL_PATH: str = os.path.join(BASE_DIR, "model", "vosk-model-small-en-us-0.15")
+PIPER_MODEL_DIR: str = os.path.join(BASE_DIR, "model", "piper")
 
 # Ensure directories exist
-for _dir in (SCREENSHOT_DIR, LOG_DIR, DATA_DIR, os.path.join(BASE_DIR, "memory")):
+for _dir in (SCREENSHOT_DIR, LOG_DIR, DATA_DIR,
+             os.path.join(BASE_DIR, "memory"),
+             os.path.join(BASE_DIR, "plugins"),
+             PIPER_MODEL_DIR):
     os.makedirs(_dir, exist_ok=True)
 
 
@@ -39,16 +45,24 @@ _settings = _load_settings()
 # ─── API Keys (from environment only — never hardcode) ───
 GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
 OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
-OLLAMA_HOST: str = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
 # ─── Voice Settings ──────────────────────────────────────
 _voice = _settings.get("voice", {})
 WAKE_WORD: str = _voice.get("wake_words", ["hey jarvis"])[0]  # Primary for backward compat
 WAKE_WORDS: list[str] = _voice.get("wake_words", ["jarvis", "hey jarvis", "okay jarvis"])
-LISTEN_MODE: str = _voice.get("listen_mode", "wake_word")  # wake_word, continuous, push_to_talk
+WAKE_ENGINE: str = _voice.get("wake_engine", "vosk_substring")  # openwakeword or vosk_substring
+OPENWAKEWORD_MODELS: list[str] = _voice.get("openwakeword_models", ["hey_jarvis"])
+LISTEN_MODE: str = _voice.get("listen_mode", "wake_word")
 WAKE_SENSITIVITY: float = _voice.get("wake_sensitivity", 1.5)
+
+# TTS Engine
+TTS_ENGINE: str = _voice.get("tts_engine", "pyttsx3")  # piper or pyttsx3
 TTS_RATE: int = _voice.get("tts_rate", 200)
 TTS_VOLUME: float = _voice.get("tts_volume", 1.0)
+PIPER_MODEL_NAME: str = _voice.get("piper_model", "en_US-lessac-medium.onnx")
+PIPER_MODEL_PATH: str = os.path.join(PIPER_MODEL_DIR, PIPER_MODEL_NAME)
+
+# Speech Recognition
 LISTEN_TIMEOUT: int = _voice.get("listen_timeout", 6)
 PHRASE_TIME_LIMIT: int = _voice.get("phrase_time_limit", 8)
 AMBIENT_ADJUST_DURATION: float = _voice.get("ambient_adjust_duration", 0.5)
@@ -65,8 +79,10 @@ WAVEFORM_BARS: int = _audio.get("waveform_bars", 32)
 
 # ─── AI Engine ───────────────────────────────────────────
 _ai = _settings.get("ai", {})
-AI_PROVIDER: str = _ai.get("provider", "gemini")
+AI_PROVIDER: str = _ai.get("provider", "auto")  # auto, ollama, gemini
 AI_MODEL: str = _ai.get("model", "gemini-2.0-flash")
+OLLAMA_MODEL: str = _ai.get("ollama_model", "llama3.2")
+OLLAMA_HOST: str = os.environ.get("OLLAMA_HOST", _ai.get("ollama_host", "http://localhost:11434"))
 AI_SYSTEM_PROMPT: str = _ai.get(
     "system_prompt",
     "You are Jarvis, a brilliant AI assistant inspired by Iron Man's JARVIS. "
@@ -77,6 +93,11 @@ AI_MAX_RESPONSE_LENGTH: int = _ai.get("max_response_length", 300)
 AI_CONVERSATION_HISTORY_SIZE: int = _ai.get("conversation_history_size", 20)
 AI_PERSONALITY_LEVEL: str = _ai.get("personality_level", "high")
 AI_MEMORY_INJECTION: bool = _ai.get("memory_injection", True)
+
+# ─── Safety ──────────────────────────────────────────────
+_safety = _settings.get("safety", {})
+CONFIRM_DESTRUCTIVE: bool = _safety.get("confirm_destructive", True)
+LOG_DANGEROUS_OPS: bool = _safety.get("log_dangerous_ops", True)
 
 # ─── UI / HUD ───────────────────────────────────────────
 _ui = _settings.get("ui", {})

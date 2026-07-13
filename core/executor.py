@@ -82,6 +82,15 @@ def execute(command: str) -> str | None:
     log.info("Processing: %s", cmd)
     increment_usage(cmd)
 
+    # ─── Safety gate: confirm destructive actions ────────
+    from config.config import CONFIRM_DESTRUCTIVE
+    if CONFIRM_DESTRUCTIVE:
+        from core.safety import requires_confirmation, confirm_action
+        if requires_confirmation(cmd):
+            if not confirm_action(cmd):
+                _add_log_entry(cmd, "Cancelled by user (safety)")
+                return None
+
     # ─── 1. Exit / Quit ─────────────────────────────────
     if cmd in ("exit", "quit", "goodbye", "bye", "shut down jarvis",
                "shutdown jarvis", "close jarvis", "stop"):
@@ -273,6 +282,22 @@ def execute(command: str) -> str | None:
     # ─── 14. Smart queries ──────────────────────────────
     from commands.smart import handle_smart_command
     handled, ok, msg = handle_smart_command(cmd)
+    if handled:
+        speak(msg)
+        _add_log_entry(cmd, msg)
+        return None
+
+    # ─── 14b. Engineering commands ──────────────────────
+    from commands.engineering import handle_engineering_command
+    handled, ok, msg = handle_engineering_command(cmd)
+    if handled:
+        speak(msg)
+        _add_log_entry(cmd, msg)
+        return None
+
+    # ─── 14c. Vision commands ───────────────────────────
+    from commands.vision import handle_vision_command
+    handled, ok, msg = handle_vision_command(cmd)
     if handled:
         speak(msg)
         _add_log_entry(cmd, msg)

@@ -4,12 +4,12 @@ jarvis.py — Main entry point for J.A.R.V.I.S.
 Just A Rather Very Intelligent System — a professional desktop AI assistant.
 
 This module orchestrates all subsystems:
-- Voice listener (wake-word detection + command capture)
-- Text-to-speech engine
-- AI conversation engine (Gemini)
+- Voice listener (OpenWakeWord + Vosk wake detection + command capture)
+- Text-to-speech engine (Piper TTS / pyttsx3)
+- AI conversation engine (Ollama / Gemini)
 - System monitoring
 - Scheduled routines and hotkeys
-- Iron Man HUD (fullscreen tkinter canvas)
+- Iron Man HUD (PySide6 QPainter-based fullscreen rendering)
 
 Usage:
     python jarvis.py
@@ -27,11 +27,26 @@ log = get_logger("jarvis")
 
 def _startup_phase(hud, speak_fn):
     """Run the JARVIS boot sequence with HUD and voice."""
+    # Collect engine info for diagnostics
+    try:
+        from core.speaker import get_backend_name
+        from core.ai_engine import get_provider_name
+        from core.wake_word import is_openwakeword
+        tts_name = get_backend_name()
+        ai_name = get_provider_name()
+        wake_name = "OpenWakeWord" if is_openwakeword() else "Vosk"
+    except Exception:
+        tts_name = "Initializing"
+        ai_name = "Initializing"
+        wake_name = "Initializing"
+
     phases = [
-        ("INITIALIZING CORE SYSTEMS...", "idle", 0.8),
-        ("LOADING VOICE ENGINE...", "idle", 0.6),
-        ("CONNECTING AI ENGINE...", "processing", 0.8),
-        ("CALIBRATING SENSORS...", "processing", 0.6),
+        ("INITIALIZING CORE SYSTEMS...", "idle", 0.7),
+        (f"VOICE ENGINE: {tts_name.upper()}", "idle", 0.5),
+        (f"WAKE WORD: {wake_name.upper()}", "idle", 0.4),
+        (f"AI ENGINE: {ai_name.upper()}", "processing", 0.6),
+        ("LOADING PLUGINS...", "processing", 0.4),
+        ("SAFETY SYSTEMS ARMED", "processing", 0.3),
         ("ALL SYSTEMS ONLINE", "idle", 0.5),
     ]
     for status, state, delay in phases:
@@ -48,14 +63,15 @@ def _startup_phase(hud, speak_fn):
     except Exception:
         pass
 
-    speak_fn("J.A.R.V.I.S. online. All systems operational. How can I help you, sir?", block=False)
-    log.info("Startup sequence complete")
+    speak_fn("Jarvis online. All systems operational. How can I help you, sir?", block=False)
+    log.info("Startup sequence complete — TTS: %s, AI: %s, Wake: %s",
+             tts_name, ai_name, wake_name)
 
 
 def main():
     """Main application entry point."""
     log.info("=" * 60)
-    log.info("J.A.R.V.I.S. v2.0 — Starting up...")
+    log.info("J.A.R.V.I.S. v3.0 — Starting up...")
     log.info("=" * 60)
 
     # ─── Initialize Core ────────────────────────────────

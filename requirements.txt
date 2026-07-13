@@ -1,15 +1,33 @@
 # J.A.R.V.I.S. — Python Dependencies
 # Install: pip install -r requirements.txt
 
+# ─── UI Framework ────────────────────────────────────────
+PySide6>=6.6.0             # Qt6 GUI framework (replaces tkinter)
+
 # ─── Core Audio ──────────────────────────────────────────
-pyttsx3>=2.90              # Text-to-speech engine
 SpeechRecognition>=3.10.0  # Google Speech API wrapper
 sounddevice>=0.4.6         # Audio I/O (replaces PyAudio)
 numpy>=1.24.0              # Audio signal processing
 vosk>=0.3.45               # Offline speech recognition
 
-# ─── AI Engine ───────────────────────────────────────────
-google-genai>=1.0.0        # Google Gemini SDK (new)
+# ─── TTS Engines ─────────────────────────────────────────
+pyttsx3>=2.90              # Fallback TTS (SAPI5 / espeak)
+# piper-tts                # Neural TTS (install separately if using Piper)
+#                          # pip install piper-tts
+#                          # Then download a model to model/piper/
+
+# ─── Wake Word ───────────────────────────────────────────
+# openwakeword             # Neural wake word detection (install separately)
+#                          # pip install openwakeword
+#                          # Uses pre-trained "hey_jarvis" model
+
+# ─── AI Engines ──────────────────────────────────────────
+google-genai>=1.0.0        # Google Gemini SDK (free tier)
+requests>=2.31.0           # HTTP client (for Ollama API + general)
+# ollama                   # Optional: pip install ollama (for Python client)
+#                          # Core: Ollama API is REST-based, no pip package needed
+#                          # Install Ollama from https://ollama.ai
+#                          # Then: ollama pull llama3.2
 
 # ─── System Monitoring ──────────────────────────────────
 psutil>=5.9.0              # CPU, RAM, battery, disk, network
@@ -21,8 +39,24 @@ pyautogui>=0.9.54          # Screenshots & automation
 pywhatkit>=5.4             # YouTube playback
 
 # ─── Web & API ───────────────────────────────────────────
-requests>=2.31.0           # HTTP client
 wikipedia>=1.4.0           # Wikipedia summaries
+
+# ─── Browser Automation (optional) ───────────────────────
+# playwright               # Advanced browser automation
+#                          # pip install playwright
+#                          # playwright install chromium
+
+# ─── Computer Vision (optional) ──────────────────────────
+# opencv-python            # Camera, image processing
+#                          # pip install opencv-python
+# ultralytics              # YOLO object detection
+#                          # pip install ultralytics
+# pytesseract              # OCR text extraction
+#                          # pip install pytesseract
+#                          # Also install Tesseract-OCR: https://github.com/tesseract-ocr/tesseract
+# pyzbar                   # QR/barcode scanning
+#                          # pip install pyzbar
+Pillow>=10.0.0             # Image processing (used by OCR, vision)
 
 # ─── Environment ─────────────────────────────────────────
 python-dotenv>=1.0.0       # Load .env files (optional)

@@ -1,10 +1,14 @@
 {
     "voice": {
         "wake_words": ["jarvis", "hey jarvis", "okay jarvis"],
+        "wake_engine": "vosk_substring",
+        "openwakeword_models": ["hey_jarvis"],
         "listen_mode": "wake_word",
         "wake_sensitivity": 1.5,
+        "tts_engine": "pyttsx3",
         "tts_rate": 200,
         "tts_volume": 1.0,
+        "piper_model": "en_US-lessac-medium.onnx",
         "listen_timeout": 6,
         "phrase_time_limit": 8,
         "ambient_adjust_duration": 0.5,
@@ -19,13 +23,19 @@
         "waveform_bars": 32
     },
     "ai": {
-        "provider": "gemini",
+        "provider": "auto",
         "model": "gemini-2.0-flash",
+        "ollama_model": "llama3.2",
+        "ollama_host": "http://localhost:11434",
         "system_prompt": "You are Jarvis, a brilliant AI assistant inspired by Iron Man's JARVIS. You are witty, confident, and genuinely helpful. You have personality — you crack subtle jokes, show enthusiasm for interesting problems, and express mild frustration at boring ones. You speak naturally like a real person, not a robot. Keep responses short (2-3 sentences) unless the user asks for detail. Address the user as 'sir' occasionally but not every time. You remember things about the user and reference past conversations naturally. You're an expert in programming, electronics, embedded systems, VLSI, and general knowledge. When you don't know something, admit it with charm rather than making things up.",
         "max_response_length": 300,
         "conversation_history_size": 20,
         "personality_level": "high",
         "memory_injection": true
+    },
+    "safety": {
+        "confirm_destructive": true,
+        "log_dangerous_ops": true
     },
     "ui": {
         "fps": 30,
