@@ -323,4 +323,284 @@ def handle_file_command(command: str) -> tuple[bool, bool, str]:
         ok, msg = count_files(path or "")
         return True, ok, msg
 
+    # ─── File Intelligence (natural language) ────────────
+
+    # "find the pdf I opened yesterday" / "find pdf files"
+    if cmd.startswith("find the ") or cmd.startswith("find my ") or cmd.startswith("locate "):
+        ok, msg = smart_find_file(cmd)
+        return True, ok, msg
+
+    # "show the biggest files" / "largest files on desktop"
+    if "biggest file" in cmd or "largest file" in cmd:
+        path = ""
+        for loc in ("desktop", "documents", "downloads"):
+            if loc in cmd:
+                path = loc
+                break
+        ok, msg = find_largest_files(path or "desktop")
+        return True, ok, msg
+
+    # "open the latest screenshot"
+    if "latest screenshot" in cmd or "last screenshot" in cmd or "recent screenshot" in cmd:
+        ok, msg = find_latest_screenshot()
+        return True, ok, msg
+
+    # "show today's files" / "files from today"
+    if "today's file" in cmd or "files from today" in cmd or "today files" in cmd:
+        path = ""
+        for loc in ("desktop", "documents", "downloads"):
+            if loc in cmd:
+                path = loc
+                break
+        ok, msg = find_todays_files(path or "desktop")
+        return True, ok, msg
+
+    # "open recycle bin" / "empty recycle bin"
+    if cmd in ("open recycle bin", "open trash", "recycle bin"):
+        os.system("start shell:RecycleBinFolder")
+        return True, True, "Opening the Recycle Bin, sir."
+    if cmd in ("empty recycle bin", "empty trash", "clear recycle bin"):
+        ok, msg = empty_recycle_bin()
+        return True, ok, msg
+
+    # "open my downloads" / "show recent documents"
+    if "my downloads" in cmd or "recent downloads" in cmd:
+        ok, msg = open_folder("downloads")
+        return True, ok, msg
+    if "my documents" in cmd or "recent documents" in cmd:
+        ok, msg = open_folder("documents")
+        return True, ok, msg
+
     return False, False, ""
+
+
+# ═══════════════════════════════════════════════════════════
+# File Intelligence — Natural Language Queries
+# ═══════════════════════════════════════════════════════════
+
+def smart_find_file(query: str) -> tuple[bool, str]:
+    """
+    Find files using natural language queries.
+
+    Examples:
+    - "find the pdf I opened yesterday"
+    - "find my python files"
+    - "locate the document I edited last night"
+    """
+    from datetime import datetime, timedelta
+
+    query_lower = query.lower()
+
+    # Determine extension filter
+    ext_map = {
+        "pdf": ".pdf", "word": ".docx", "doc": ".docx",
+        "excel": ".xlsx", "spreadsheet": ".xlsx",
+        "python": ".py", "py": ".py",
+        "image": (".png", ".jpg", ".jpeg", ".gif", ".bmp"),
+        "photo": (".png", ".jpg", ".jpeg"),
+        "video": (".mp4", ".avi", ".mkv", ".mov"),
+        "text": ".txt", "txt": ".txt",
+        "powerpoint": ".pptx", "pptx": ".pptx",
+        "zip": ".zip", "archive": (".zip", ".rar", ".7z"),
+    }
+
+    target_ext = None
+    for keyword, ext in ext_map.items():
+        if keyword in query_lower:
+            target_ext = ext
+            break
+
+    # Determine time filter
+    time_filter = None
+    now = datetime.now()
+    if "yesterday" in query_lower:
+        time_filter = now - timedelta(days=1)
+    elif "today" in query_lower:
+        time_filter = now.replace(hour=0, minute=0, second=0)
+    elif "last night" in query_lower or "tonight" in query_lower:
+        time_filter = now - timedelta(hours=12)
+    elif "this week" in query_lower:
+        time_filter = now - timedelta(days=7)
+    elif "last week" in query_lower:
+        time_filter = now - timedelta(days=14)
+
+    # Determine search location
+    search_dirs = []
+    home = os.path.expanduser("~")
+    for loc, folder in [("desktop", "Desktop"), ("documents", "Documents"),
+                        ("downloads", "Downloads"), ("pictures", "Pictures")]:
+        if loc in query_lower:
+            search_dirs.append(os.path.join(home, folder))
+    if not search_dirs:
+        # Search common locations
+        search_dirs = [
+            os.path.join(home, "Desktop"),
+            os.path.join(home, "Documents"),
+            os.path.join(home, "Downloads"),
+        ]
+
+    # Search
+    results = []
+    for search_dir in search_dirs:
+        if not os.path.exists(search_dir):
+            continue
+        try:
+            for entry in os.scandir(search_dir):
+                if not entry.is_file():
+                    continue
+                name = entry.name.lower()
+
+                # Extension filter
+                if target_ext:
+                    if isinstance(target_ext, tuple):
+                        if not any(name.endswith(e) for e in target_ext):
+                            continue
+                    elif not name.endswith(target_ext):
+                        continue
+
+                # Time filter
+                if time_filter:
+                    stat = entry.stat()
+                    mod_time = datetime.fromtimestamp(stat.st_mtime)
+                    if mod_time < time_filter:
+                        continue
+
+                stat = entry.stat()
+                results.append({
+                    "name": entry.name,
+                    "path": entry.path,
+                    "size": stat.st_size,
+                    "modified": datetime.fromtimestamp(stat.st_mtime),
+                })
+        except PermissionError:
+            continue
+
+    # Sort by modification time (newest first)
+    results.sort(key=lambda x: x["modified"], reverse=True)
+
+    if results:
+        top = results[:3]
+        names = [f["name"] for f in top]
+        msg = f"I found {len(results)} matching files. The most recent: {', '.join(names)}."
+        if len(results) == 1:
+            # Auto-open if single result
+            try:
+                os.startfile(results[0]["path"])
+                msg = f"Opening {results[0]['name']}, sir."
+            except Exception:
+                pass
+        return True, msg
+    else:
+        return False, "I'm afraid I couldn't find any matching files, sir."
+
+
+def find_largest_files(location: str = "desktop", limit: int = 5) -> tuple[bool, str]:
+    """Find the largest files in a location."""
+    search_dir = _resolve_path(location)
+    if not os.path.exists(search_dir):
+        return False, f"I can't access {location}, sir."
+
+    files = []
+    try:
+        for entry in os.scandir(search_dir):
+            if entry.is_file():
+                stat = entry.stat()
+                files.append((entry.name, stat.st_size))
+    except PermissionError:
+        return False, f"I don't have permission to scan {location}, sir."
+
+    files.sort(key=lambda x: x[1], reverse=True)
+    top = files[:limit]
+
+    if top:
+        lines = []
+        for name, size in top:
+            if size > 1_000_000_000:
+                s = f"{size / 1_000_000_000:.1f} GB"
+            elif size > 1_000_000:
+                s = f"{size / 1_000_000:.1f} MB"
+            elif size > 1_000:
+                s = f"{size / 1_000:.0f} KB"
+            else:
+                s = f"{size} bytes"
+            lines.append(f"{name} at {s}")
+        return True, f"The biggest files in {location}: {', '.join(lines)}."
+    else:
+        return False, f"No files found in {location}, sir."
+
+
+def find_latest_screenshot() -> tuple[bool, str]:
+    """Find and open the most recent screenshot."""
+    from config.config import SCREENSHOT_DIR
+
+    search_dirs = [SCREENSHOT_DIR]
+
+    # Also check common screenshot locations
+    home = os.path.expanduser("~")
+    for d in ["Pictures/Screenshots", "Desktop", "OneDrive/Pictures/Screenshots"]:
+        full = os.path.join(home, d)
+        if os.path.exists(full) and full not in search_dirs:
+            search_dirs.append(full)
+
+    latest = None
+    latest_time = 0
+
+    for search_dir in search_dirs:
+        if not os.path.exists(search_dir):
+            continue
+        for entry in os.scandir(search_dir):
+            if entry.is_file():
+                name = entry.name.lower()
+                if any(name.endswith(ext) for ext in ('.png', '.jpg', '.jpeg', '.bmp')):
+                    stat = entry.stat()
+                    if stat.st_mtime > latest_time:
+                        latest_time = stat.st_mtime
+                        latest = entry.path
+
+    if latest:
+        try:
+            os.startfile(latest)
+            return True, f"Opening {os.path.basename(latest)}, sir."
+        except Exception:
+            return True, f"Latest screenshot: {os.path.basename(latest)}."
+    else:
+        return False, "I couldn't find any screenshots, sir."
+
+
+def find_todays_files(location: str = "desktop") -> tuple[bool, str]:
+    """Find files modified today."""
+    from datetime import datetime
+    search_dir = _resolve_path(location)
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    files = []
+    if os.path.exists(search_dir):
+        for entry in os.scandir(search_dir):
+            if entry.is_file():
+                stat = entry.stat()
+                mod = datetime.fromtimestamp(stat.st_mtime)
+                if mod >= today:
+                    files.append(entry.name)
+
+    if files:
+        count = len(files)
+        names = ", ".join(files[:5])
+        extra = f" and {count - 5} more" if count > 5 else ""
+        return True, f"You have {count} files from today in {location}: {names}{extra}."
+    else:
+        return False, f"No files were modified today in {location}, sir."
+
+
+def empty_recycle_bin() -> tuple[bool, str]:
+    """Empty the Windows Recycle Bin."""
+    try:
+        import ctypes
+        # SHEmptyRecycleBin(hwnd, path, flags)
+        # SHERB_NOCONFIRMATION = 0x00000001
+        # SHERB_NOPROGRESSUI = 0x00000002
+        # SHERB_NOSOUND = 0x00000004
+        ctypes.windll.shell32.SHEmptyRecycleBinW(None, None, 0x0007)
+        return True, "Recycle Bin has been emptied, sir."
+    except Exception as e:
+        return False, f"I couldn't empty the Recycle Bin: {e}"
+

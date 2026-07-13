@@ -32,7 +32,7 @@ _stats: dict[str, Any] = {
     "hostname": platform.node(),
     "os_name": f"{platform.system()} {platform.release()}",
     "cpu_history": [0] * 30,
-    # New stats
+    # GPU stats
     "gpu_name": "N/A",
     "gpu_load": 0.0,
     "gpu_memory_used": 0,
@@ -45,6 +45,15 @@ _stats: dict[str, Any] = {
     "active_window": "",
     "uptime_hours": 0,
     "process_count": 0,
+    # ─── Diagnostics (new) ──────────────────────────────
+    "mic_active": False,
+    "mic_device": "Unknown",
+    "speaker_active": False,
+    "wake_word_status": "inactive",
+    "ai_status": "offline",
+    "ai_latency_ms": 0,
+    "recognition_confidence": 0.0,
+    "noise_level": 0.0,
 }
 _lock = threading.Lock()
 _running = False
@@ -220,6 +229,42 @@ def _update_loop() -> None:
                 _stats["active_window"] = active_window
                 _stats["uptime_hours"] = uptime_hours
                 _stats["process_count"] = proc_count
+
+                # ─── Diagnostics: mic / speaker / AI ─────
+                try:
+                    from core.mic import is_mic_healthy, get_mic_device_name, get_ambient_noise, get_last_confidence
+                    _stats["mic_active"] = is_mic_healthy()
+                    _stats["mic_device"] = get_mic_device_name()
+                    _stats["noise_level"] = round(get_ambient_noise(), 1)
+                    _stats["recognition_confidence"] = round(get_last_confidence(), 2)
+                except Exception:
+                    pass
+
+                try:
+                    from core.listener import is_wake_loop_alive, get_state
+                    state = get_state()
+                    if is_wake_loop_alive():
+                        _stats["wake_word_status"] = state
+                    else:
+                        _stats["wake_word_status"] = "dead"
+                except Exception:
+                    pass
+
+                try:
+                    from core.ai_engine import is_available, get_provider_name, get_last_latency
+                    if is_available():
+                        _stats["ai_status"] = get_provider_name()
+                        _stats["ai_latency_ms"] = get_last_latency()
+                    else:
+                        _stats["ai_status"] = "offline"
+                except Exception:
+                    pass
+
+                try:
+                    from core.speaker import is_speaking
+                    _stats["speaker_active"] = is_speaking()
+                except Exception:
+                    _stats["speaker_active"] = False
 
         except Exception as e:
             log.error("System info update error: %s", e)

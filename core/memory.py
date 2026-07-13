@@ -561,16 +561,133 @@ class Memory:
             try:
                 total = conn.execute("SELECT COUNT(*) FROM memory").fetchone()[0]
                 notes_count = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+                conv_count = conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
                 categories = conn.execute(
                     "SELECT category, COUNT(*) as count FROM memory GROUP BY category"
                 ).fetchall()
                 return {
                     "total_entries": total,
                     "notes": notes_count,
+                    "conversations": conv_count,
                     "categories": {r["category"]: r["count"] for r in categories},
                 }
             finally:
                 conn.close()
+
+    # ─── Conversation History ────────────────────────────
+
+    def log_conversation(self, role: str, content: str) -> None:
+        """Log a conversation entry (user or assistant)."""
+        now = datetime.now().isoformat()
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    "INSERT INTO conversations (role, content, timestamp) VALUES (?,?,?)",
+                    (role, content, now),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def get_conversations(self, limit: int = 20) -> list[dict]:
+        """Get recent conversation entries."""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                rows = conn.execute(
+                    "SELECT role, content, timestamp FROM conversations ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                return [
+                    {"role": r["role"], "content": r["content"], "timestamp": r["timestamp"]}
+                    for r in reversed(rows)
+                ]
+            finally:
+                conn.close()
+
+    def clear_conversations(self) -> str:
+        """Clear conversation history."""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("DELETE FROM conversations")
+                conn.commit()
+            finally:
+                conn.close()
+        return "Conversation history cleared."
+
+    # ─── App Usage Tracking ──────────────────────────────
+
+    def log_app_usage(self, app_name: str) -> None:
+        """Record that an app was opened. Tracks frequency."""
+        key = app_name.lower().strip()
+        current = self._get("app_usage", key)
+        count = int(current) + 1 if current else 1
+        self._upsert("app_usage", key, str(count))
+
+    def get_frequent_apps(self, limit: int = 10) -> list[tuple[str, int]]:
+        """Get the most frequently opened apps."""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                rows = conn.execute(
+                    "SELECT key, CAST(value AS INTEGER) as count FROM memory "
+                    "WHERE category='app_usage' ORDER BY count DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                return [(r["key"], r["count"]) for r in rows]
+            finally:
+                conn.close()
+
+    # ─── Site Usage Tracking ─────────────────────────────
+
+    def log_site_usage(self, site_name: str) -> None:
+        """Record that a website was visited. Tracks frequency."""
+        key = site_name.lower().strip()
+        current = self._get("site_usage", key)
+        count = int(current) + 1 if current else 1
+        self._upsert("site_usage", key, str(count))
+
+    def get_frequent_sites(self, limit: int = 10) -> list[tuple[str, int]]:
+        """Get the most frequently visited sites."""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                rows = conn.execute(
+                    "SELECT key, CAST(value AS INTEGER) as count FROM memory "
+                    "WHERE category='site_usage' ORDER BY count DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                return [(r["key"], r["count"]) for r in rows]
+            finally:
+                conn.close()
+
+    # ─── Schedule Memory ─────────────────────────────────
+
+    def store_schedule(self, name: str, details: str) -> str:
+        """Store a persistent schedule entry."""
+        self._upsert("schedules", name, details)
+        return f"Schedule '{name}' saved."
+
+    def get_schedules(self) -> dict[str, str]:
+        """Get all stored schedules."""
+        return self._get_all("schedules")
+
+    def delete_schedule(self, name: str) -> str:
+        """Delete a schedule entry."""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    "DELETE FROM memory WHERE category='schedules' AND key=?",
+                    (name.lower().strip(),),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        return f"Schedule '{name}' removed."
+
 
 
 # ─── Module-level singleton ─────────────────────────────

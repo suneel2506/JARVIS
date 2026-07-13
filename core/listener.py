@@ -4,14 +4,15 @@ core/listener.py — Immortal voice listener for J.A.R.V.I.S.
 The wake-word loop NEVER dies. It runs indefinitely until the application
 explicitly shuts down. If errors occur, it recovers with exponential backoff.
 
-Supports three listen modes:
-- wake_word: Listen for wake words, then capture command (default)
-- continuous: Always listening — every phrase is treated as a command
-- push_to_talk: Only activates via manual trigger (UI click or hotkey)
-
-Wake word detection backends:
-- OpenWakeWord (preferred): Neural network, low CPU, dedicated audio stream
-- Vosk substring matching (fallback): Transcribes then matches keywords
+Features:
+- Always-on wake word detection (OpenWakeWord / Vosk)
+- Low-confidence retry ("Sorry sir, could you repeat that?")
+- Mic auto-recovery with exponential backoff
+- Watchdog timer that restarts dead loops
+- Auto-recalibrate ambient noise after sleep exit
+- Silence tracking and idle time logging
+- Recognition retry with adjusted parameters
+- Three listen modes: wake_word, continuous, push_to_talk
 """
 import threading
 import time
@@ -27,7 +28,7 @@ log = get_logger("core.listener")
 wake_event = threading.Event()
 listening_event = threading.Event()
 terminate_event = threading.Event()
-sleep_event = threading.Event()  # When set, wake loop pauses (sleep mode)
+sleep_event = threading.Event()
 
 # ─── Audio levels for waveform visualization ────────────
 _waveform_levels: list[float] = [0.0] * 32
@@ -56,6 +57,15 @@ _vosk_available = False
 # ─── Wake loop health ──────────────────────────────────
 _wake_loop_alive = threading.Event()
 _last_wake_check = 0.0
+
+# ─── Confidence threshold ──────────────────────────────
+CONFIDENCE_THRESHOLD = 0.4  # Below this → ask to repeat
+
+# ─── Diagnostics ────────────────────────────────────────
+_last_confidence: float = 0.0
+_idle_since: float = 0.0
+_total_commands: int = 0
+_total_retries: int = 0
 
 
 def _init_vosk() -> bool:
@@ -135,6 +145,27 @@ def get_listen_mode() -> str:
     return _listen_mode
 
 
+# ─── Diagnostics ────────────────────────────────────────
+
+def get_diagnostics() -> dict:
+    """Get listener diagnostic information."""
+    from core.mic import get_mic_info
+    mic = get_mic_info()
+    return {
+        "state": _current_state,
+        "mode": _listen_mode,
+        "vosk_available": _vosk_available,
+        "wake_loop_alive": _wake_loop_alive.is_set(),
+        "last_confidence": _last_confidence,
+        "idle_seconds": int(time.time() - _idle_since) if _idle_since else 0,
+        "total_commands": _total_commands,
+        "total_retries": _total_retries,
+        "mic_device": mic.get("device_name", "Unknown"),
+        "mic_healthy": mic.get("healthy", False),
+        "ambient_noise": mic.get("ambient_noise", 0),
+    }
+
+
 # ─── Sleep Mode ─────────────────────────────────────────
 
 def enter_sleep() -> None:
@@ -148,6 +179,15 @@ def exit_sleep() -> None:
     """Exit sleep mode — resume wake word listening."""
     sleep_event.clear()
     set_state(STATE_WAKE_LISTENING)
+
+    # Recalibrate ambient noise after sleep
+    try:
+        from core.mic import calibrate
+        calibrate(duration=0.5)
+        log.info("Ambient noise recalibrated after sleep exit")
+    except Exception:
+        pass
+
     log.info("Exiting sleep mode")
 
 
@@ -175,10 +215,12 @@ def start_audio_stream() -> None:
     try:
         import sounddevice as sd
         from config.config import SAMPLING_RATE, FRAME_DURATION
+        from core.mic import _mic_device_index
         blocksize = int(SAMPLING_RATE * FRAME_DURATION)
         _audio_stream = sd.InputStream(
             channels=1, samplerate=SAMPLING_RATE,
             blocksize=blocksize, callback=_audio_callback,
+            device=_mic_device_index,
         )
         _audio_stream.start()
         _use_sounddevice = True
@@ -199,42 +241,22 @@ def stop_audio_stream() -> None:
             pass
 
 
-# ─── Speech Recognition (Vosk offline + Google fallback) ─
+# ─── Speech Recognition with Confidence ─────────────────
 
-def _recognize_audio(recognizer: sr.Recognizer, audio: sr.AudioData) -> str:
+def _recognize_audio(recognizer: sr.Recognizer, audio: sr.AudioData) -> tuple[str, float]:
     """
-    Recognize speech from audio data.
-    Tries Vosk first (offline), falls back to Google (online).
+    Recognize speech and return (text, confidence).
+    Uses the hardened mic module's confidence-aware recognizer.
     """
-    if _vosk_available and _vosk_model is not None:
-        try:
-            import json as json_mod
-            from vosk import KaldiRecognizer
-            from config.config import SAMPLING_RATE
-
-            rec = KaldiRecognizer(_vosk_model, SAMPLING_RATE)
-            raw_data = audio.get_raw_data(convert_rate=SAMPLING_RATE, convert_width=2)
-            rec.AcceptWaveform(raw_data)
-            result = json_mod.loads(rec.FinalResult())
-            text = result.get("text", "").strip()
-            if text:
-                return text.lower()
-        except Exception as e:
-            log.debug("Vosk recognition failed, falling back to Google: %s", e)
-
-    try:
-        text = recognizer.recognize_google(audio)
-        return text.lower()
-    except sr.UnknownValueError:
-        return ""
-    except sr.RequestError as e:
-        log.warning("Google Speech API error: %s", e)
-        return ""
+    from core.mic import recognize_with_confidence
+    return recognize_with_confidence(
+        recognizer, audio,
+        vosk_model=_vosk_model if _vosk_available else None,
+    )
 
 
 def _matches_wake_word(text: str) -> bool:
-    """Check if text contains any registered wake word.
-    Uses the wake_word module which handles both OpenWakeWord and fallback."""
+    """Check if text contains any registered wake word."""
     from core.wake_word import detect_from_text
     return detect_from_text(text)
 
@@ -245,63 +267,66 @@ def _wake_loop() -> None:
     """
     Background thread: continuously listens for wake words.
 
-    IMMORTAL — this loop never dies unless terminate_event is set.
-    On error, it recovers with exponential backoff (0.5s → 5s cap).
-    Logs a heartbeat every 5 minutes for diagnostics.
+    IMMORTAL — never dies unless terminate_event is set.
+    On error, recovers with exponential backoff (0.5s → 10s cap).
+    Detects mic disconnection and attempts re-init.
     """
-    from core.mic import listen_with_sounddevice
+    global _idle_since
+
+    from core.mic import listen_with_sounddevice, detect_microphone
 
     recognizer = sr.Recognizer()
     set_state(STATE_WAKE_LISTENING)
     _wake_loop_alive.set()
+    _idle_since = time.time()
 
     backoff = 0.5
-    max_backoff = 5.0
+    max_backoff = 10.0
     consecutive_errors = 0
-    heartbeat_interval = 300  # 5 minutes
+    heartbeat_interval = 300
     last_heartbeat = time.time()
 
     log.info("Wake-word loop started (immortal). Mode: %s", _listen_mode)
 
     while not terminate_event.is_set():
-        # ─── Sleep mode check ────────────────────────
+        # Sleep mode check
         if sleep_event.is_set():
             time.sleep(1.0)
             continue
 
-        # ─── Push-to-talk mode: just wait for manual activation
+        # Push-to-talk mode: just wait
         if _listen_mode == "push_to_talk":
             time.sleep(0.5)
             continue
 
-        # ─── Skip if actively listening for a command ─
+        # Skip if actively listening for a command
         if listening_event.is_set():
             time.sleep(0.3)
             continue
 
-        # ─── Heartbeat logging ───────────────────────
+        # Heartbeat logging
         now = time.time()
         if now - last_heartbeat > heartbeat_interval:
             last_heartbeat = now
-            log.info("Wake loop alive — mode: %s, errors: %d", _listen_mode, consecutive_errors)
-            consecutive_errors = 0  # Reset error count after heartbeat
+            log.info("Wake loop alive — mode: %s, errors: %d, idle: %ds",
+                     _listen_mode, consecutive_errors,
+                     int(now - _idle_since))
+            consecutive_errors = 0
 
-        # ─── Listen for audio ────────────────────────
+        # Listen for audio
         try:
             audio = listen_with_sounddevice(
                 recognizer, timeout=3, phrase_time_limit=2,
             )
-            text = _recognize_audio(recognizer, audio)
+            text, confidence = _recognize_audio(recognizer, audio)
 
             if text:
                 if _listen_mode == "continuous":
-                    # In continuous mode, every phrase is a command
-                    log.info("Continuous mode — heard: %s", text)
+                    log.info("Continuous mode — heard: '%s' (conf: %.2f)", text, confidence)
                     wake_event.set()
-                    # Store the text so command capture can use it directly
                     _store_continuous_text(text)
                 elif _matches_wake_word(text):
-                    log.info("Wake word detected: '%s'", text)
+                    log.info("Wake word detected: '%s' (conf: %.2f)", text, confidence)
                     wake_event.set()
 
             # Reset backoff on success
@@ -309,8 +334,25 @@ def _wake_loop() -> None:
             backoff = 0.5
 
         except sr.WaitTimeoutError:
-            # Normal — no speech detected within timeout
             continue
+        except RuntimeError as e:
+            # Mic disconnected — attempt recovery
+            if terminate_event.is_set():
+                break
+            consecutive_errors += 1
+            log.warning("Mic error (#%d): %s — attempting recovery...",
+                        consecutive_errors, e)
+            time.sleep(min(backoff, max_backoff))
+            backoff = min(backoff * 2, max_backoff)
+
+            # Try to re-detect microphone
+            try:
+                detect_microphone()
+                log.info("Microphone re-detected after recovery")
+                backoff = 0.5
+            except Exception:
+                pass
+
         except Exception as e:
             if terminate_event.is_set():
                 break
@@ -347,12 +389,20 @@ def _pop_continuous_text() -> Optional[str]:
 def listen_for_command() -> str:
     """
     Listen for a single voice command after wake-word activation.
-    In continuous mode, returns the already-captured text.
+
+    Features:
+    - Confidence-based retry: if confidence < threshold, ask to repeat
+    - Recognition retry: on empty result, retry once with longer timeout
+    - Conversation-ready: returns clean text for executor
     """
+    global _last_confidence, _idle_since, _total_commands, _total_retries
+
     # In continuous mode, use the buffered text
     if _listen_mode == "continuous":
         text = _pop_continuous_text()
         if text:
+            _total_commands += 1
+            _idle_since = time.time()
             return text
 
     from core.mic import listen_with_sounddevice
@@ -362,28 +412,53 @@ def listen_for_command() -> str:
     set_state(STATE_ACTIVE_LISTENING)
     listening_event.set()
 
-    try:
-        log.info("Listening for command...")
-        audio = listen_with_sounddevice(
-            recognizer, timeout=LISTEN_TIMEOUT, phrase_time_limit=PHRASE_TIME_LIMIT,
-        )
-        text = _recognize_audio(recognizer, audio)
-        if text:
-            log.info("Heard: %s", text)
-        return text
-    except sr.WaitTimeoutError:
-        return ""
-    except sr.UnknownValueError:
-        return ""
-    except sr.RequestError:
-        log.warning("Speech API error during command capture")
-        return ""
-    except Exception as e:
-        log.error("Listen error: %s", e)
-        return ""
-    finally:
-        listening_event.clear()
-        set_state(STATE_WAKE_LISTENING)
+    max_attempts = 2  # Original + 1 retry
+
+    for attempt in range(max_attempts):
+        try:
+            timeout = LISTEN_TIMEOUT if attempt == 0 else LISTEN_TIMEOUT + 2
+            phrase_limit = PHRASE_TIME_LIMIT if attempt == 0 else PHRASE_TIME_LIMIT + 3
+
+            if attempt > 0:
+                log.info("Retry attempt %d — listening with extended timeout...", attempt)
+                _total_retries += 1
+
+            audio = listen_with_sounddevice(
+                recognizer, timeout=timeout, phrase_time_limit=phrase_limit,
+            )
+            text, confidence = _recognize_audio(recognizer, audio)
+            _last_confidence = confidence
+
+            if text:
+                # Low confidence — ask to repeat
+                if confidence < CONFIDENCE_THRESHOLD and attempt == 0:
+                    log.info("Low confidence (%.2f) for: '%s' — requesting repeat",
+                             confidence, text)
+                    from core.speaker import speak
+                    speak("Sorry sir, could you repeat that?", block=True)
+                    continue  # Retry
+
+                log.info("Heard: '%s' (confidence: %.2f)", text, confidence)
+                _total_commands += 1
+                _idle_since = time.time()
+                return text
+
+        except sr.WaitTimeoutError:
+            if attempt == 0:
+                continue  # Silent retry
+        except sr.UnknownValueError:
+            if attempt == 0:
+                continue
+        except RuntimeError as e:
+            log.error("Mic error during command: %s", e)
+            break
+        except Exception as e:
+            log.error("Listen error: %s", e)
+            break
+
+    listening_event.clear()
+    set_state(STATE_WAKE_LISTENING)
+    return ""
 
 
 def _command_capture_loop() -> None:
@@ -396,9 +471,13 @@ def _command_capture_loop() -> None:
 
             # In continuous mode, skip the "Yes?" prompt
             if _listen_mode != "continuous":
-                speak("Yes?", block=True)
+                speak("Yes, sir?", block=True)
 
             cmd = listen_for_command()
+
+            # Clear listening state
+            listening_event.clear()
+
             if cmd:
                 set_state(STATE_PROCESSING)
                 if _on_command_callback:
@@ -411,26 +490,55 @@ def _command_capture_loop() -> None:
                 set_state(STATE_WAKE_LISTENING)
             else:
                 if _listen_mode != "continuous":
-                    speak("I didn't catch that.", block=False)
+                    speak("I didn't catch that, sir.", block=False)
                 set_state(STATE_WAKE_LISTENING)
+
+
+# ─── Watchdog ───────────────────────────────────────────
+
+def _watchdog_loop() -> None:
+    """
+    Monitor the wake loop and restart it if it dies.
+    Checks every 30 seconds.
+    """
+    while not terminate_event.is_set():
+        time.sleep(30)
+        if terminate_event.is_set():
+            break
+
+        if not _wake_loop_alive.is_set() and not terminate_event.is_set():
+            log.warning("WATCHDOG: Wake loop is dead — restarting...")
+            threading.Thread(target=_wake_loop, daemon=True, name="WakeLoop").start()
+            time.sleep(5)
 
 
 # ─── Start / Stop ───────────────────────────────────────
 
 def start_listener() -> None:
-    """Start the voice listener (wake loop + command capture + audio stream)."""
-    global _listen_mode
+    """Start the voice listener (mic detection + wake loop + command capture + watchdog)."""
+    global _listen_mode, _idle_since
     from config.config import LISTEN_MODE
     _listen_mode = LISTEN_MODE
+    _idle_since = time.time()
 
+    # Auto-detect microphone
+    from core.mic import detect_microphone, calibrate
+    idx, name = detect_microphone()
+    log.info("Using microphone: %s (index: %s)", name, idx)
+
+    # Initial ambient calibration
+    calibrate(duration=1.0)
+
+    # Init Vosk
     _init_vosk()
+
+    # Start audio waveform stream
     start_audio_stream()
 
-    # Initialize wake word engine (OpenWakeWord or Vosk fallback)
+    # Initialize wake word engine
     from core.wake_word import init_wake_engine, is_openwakeword, start_stream, set_on_wake
     init_wake_engine()
 
-    # If OpenWakeWord is active, wire its detection to the wake event
     if is_openwakeword():
         def _oww_wake_callback():
             if not sleep_event.is_set() and not listening_event.is_set():
@@ -442,11 +550,13 @@ def start_listener() -> None:
     else:
         log.info("Using Vosk substring matching for wake detection")
 
+    # Start threads
     threading.Thread(target=_wake_loop, daemon=True, name="WakeLoop").start()
     threading.Thread(target=_command_capture_loop, daemon=True, name="CommandCapture").start()
+    threading.Thread(target=_watchdog_loop, daemon=True, name="Watchdog").start()
 
-    log.info("Listener started — Vosk: %s, Mode: %s",
-             "enabled" if _vosk_available else "disabled", _listen_mode)
+    log.info("Listener started — Vosk: %s, Mode: %s, Mic: %s",
+             "enabled" if _vosk_available else "disabled", _listen_mode, name)
 
 
 def stop_listener() -> None:

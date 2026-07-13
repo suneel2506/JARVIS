@@ -79,8 +79,19 @@ def execute(command: str) -> str | None:
         return None
 
     cmd = command.lower().strip()
+
+    # ─── Intent normalization ────────────────────────────
+    # Transform natural phrases into standard commands
+    # e.g., "could you launch Chrome?" → "open chrome"
+    from core.intent import normalize_command
+    raw_cmd = cmd  # Preserve original for logging
+    cmd = normalize_command(cmd)
+    if cmd != raw_cmd:
+        log.info("Intent: '%s' → '%s'", raw_cmd, cmd)
+
     log.info("Processing: %s", cmd)
     increment_usage(cmd)
+
 
     # ─── Safety gate: confirm destructive actions ────────
     from config.config import CONFIRM_DESTRUCTIVE
@@ -193,8 +204,34 @@ def execute(command: str) -> str | None:
         _add_log_entry(cmd, msg)
         return None
 
-    # ─── 6. App launch commands ─────────────────────────
+    # ─── 6a. Switch to / List / Search apps ────────────────
+    if cmd.startswith("switch to ") or cmd.startswith("go to "):
+        from commands.apps import switch_to_app
+        target = cmd.replace("switch to ", "").replace("go to ", "").strip()
+        ok, msg = switch_to_app(target)
+        speak(msg)
+        _add_log_entry(cmd, msg)
+        return None
+
+    if cmd in ("what's running", "what apps are running", "list running apps",
+               "show running apps", "running apps", "running applications"):
+        from commands.apps import list_running_apps
+        ok, msg = list_running_apps()
+        speak(msg)
+        _add_log_entry(cmd, msg)
+        return None
+
+    if cmd.startswith("find app ") or cmd.startswith("search app "):
+        from commands.apps import search_apps
+        query = cmd.replace("find app ", "").replace("search app ", "").strip()
+        ok, msg = search_apps(query)
+        speak(msg)
+        _add_log_entry(cmd, msg)
+        return None
+
+    # ─── 6b. App launch commands ────────────────────────
     if any(cmd.startswith(p) for p in ("open ", "launch ", "start ", "close ")):
+
         if cmd.startswith("close "):
             from commands.apps import close_app
             app_name = cmd.replace("close ", "").strip()
