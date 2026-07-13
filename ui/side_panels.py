@@ -1,6 +1,7 @@
 """
-ui/side_panels.py — Left and Right HUD panels for Jarvis.
-Left: System diagnostics (CPU, RAM, Battery, Network)
+ui/side_panels.py — Left and Right HUD panels for J.A.R.V.I.S.
+
+Left: System diagnostics (CPU, RAM, Battery, Disk, Network, Mic status)
 Right: Command activity log
 """
 import math
@@ -64,14 +65,31 @@ class SystemPanel:
         item = self.canvas.create_text(x + w - 15, y + 248, text=net_text, fill=net_color, font=("Consolas", 8, "bold"), anchor="e")
         self.items.append(item)
 
+        # Battery charging indicator
+        bat_plugged = self.stats.get("battery_plugged", False)
+        if bat_plugged:
+            item = self.canvas.create_text(x + w - 15, y + 165, text="⚡", fill=ACCENT_GREEN, font=("Consolas", 10), anchor="e")
+            self.items.append(item)
+
+        # Mic status
+        mic_state = self.stats.get("mic_state", "standby")
+        mic_colors = {"standby": PRIMARY_DIM, "listening": ACCENT_GREEN, "active_listening": ACCENT_GREEN, "processing": ACCENT_ORANGE}
+        mic_labels = {"standby": "● STANDBY", "listening": "● ACTIVE", "active_listening": "● ACTIVE", "processing": "● BUSY"}
+        mic_color = mic_colors.get(mic_state, PRIMARY_DIM)
+        mic_label = mic_labels.get(mic_state, "● STANDBY")
+        item = self.canvas.create_text(x + 15, y + 268, text="MIC", fill=TEXT_DIM, font=("Consolas", 8), anchor="w")
+        self.items.append(item)
+        item = self.canvas.create_text(x + w - 15, y + 268, text=mic_label, fill=mic_color, font=("Consolas", 8, "bold"), anchor="e")
+        self.items.append(item)
+
         # CPU History graph
-        self._draw_cpu_graph(x + 15, y + 275, w - 30, 80)
+        self._draw_cpu_graph(x + 15, y + 295, w - 30, 80)
 
         # System info
         hostname = self.stats.get("hostname", "N/A")
         os_name = self.stats.get("os_name", "N/A")
         ip = self.stats.get("ip_address", "N/A")
-        info_y = y + 375
+        info_y = y + 395
         item = self.canvas.create_text(x + 15, info_y, text=f"HOST: {hostname}", fill=TEXT_DIM, font=("Consolas", 8), anchor="w")
         self.items.append(item)
         item = self.canvas.create_text(x + 15, info_y + 16, text=f"OS: {os_name}", fill=TEXT_DIM, font=("Consolas", 8), anchor="w")

@@ -1,13 +1,27 @@
-SpeechRecognition>=3.10.0
-pyttsx3>=2.90
-PyAudio>=0.2.14
-pywhatkit>=5.4
-wikipedia>=1.4.0
-keyboard>=0.13.5
-pyautogui>=0.9.54
-sounddevice>=0.4.6
-numpy>=1.24.0
-Pillow>=10.0.0
-psutil>=5.9.0
-requests>=2.31.0
-google-generativeai>=0.5.0
+# J.A.R.V.I.S. — Python Dependencies
+# Install: pip install -r requirements.txt
+
+# ─── Core Audio ──────────────────────────────────────────
+pyttsx3>=2.90              # Text-to-speech engine
+SpeechRecognition>=3.10.0  # Google Speech API wrapper
+sounddevice>=0.4.6         # Audio I/O (replaces PyAudio)
+numpy>=1.24.0              # Audio signal processing
+vosk>=0.3.45               # Offline speech recognition
+
+# ─── AI Engine ───────────────────────────────────────────
+google-genai>=1.0.0        # Google Gemini SDK (new)
+
+# ─── System Monitoring ──────────────────────────────────
+psutil>=5.9.0              # CPU, RAM, battery, disk, network
+
+# ─── Automation ──────────────────────────────────────────
+keyboard>=0.13.5           # Global hotkeys & media keys
+pyautogui>=0.9.54          # Screenshots & automation
+pywhatkit>=5.4             # YouTube playback
+
+# ─── Web & API ───────────────────────────────────────────
+requests>=2.31.0           # HTTP client
+wikipedia>=1.4.0           # Wikipedia summaries
+
+# ─── Environment ─────────────────────────────────────────
+python-dotenv>=1.0.0       # Load .env files (optional)

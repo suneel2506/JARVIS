@@ -1,9 +1,14 @@
 """
-commands/smart.py — Smart query commands for Jarvis.
-Time, date, weather, jokes, math, IP, and general info.
+commands/smart.py — Smart query commands for J.A.R.V.I.S.
+
+Time, date, weather, jokes, math, IP, system status, and conversational responses.
 """
 from datetime import datetime
 import random
+
+from core.logger import get_logger
+
+log = get_logger("commands.smart")
 
 
 def get_time():
@@ -86,7 +91,7 @@ def get_ip():
             return False, "Couldn't determine IP address"
 
 
-def get_system_status():
+def get_system_status() -> tuple[bool, str]:
     """Get a brief system status report."""
     try:
         from core.system_info import get_stats
