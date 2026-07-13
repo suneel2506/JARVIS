@@ -99,8 +99,14 @@ def speak(text: str, block: bool = True) -> None:
     """
     if not text:
         return
+    
+    # Clean up dotted initials so the TTS engine pronounces it as a single word 'Jarvis'
+    text_clean = str(text)
+    for pattern in ("J.A.R.V.I.S.", "J.A.R.V.I.S", "J. A. R. V. I. S.", "J. A. R. V. I. S"):
+        text_clean = text_clean.replace(pattern, "Jarvis")
+        
     start_speaker()  # Ensure worker is running
-    _speak_queue.put(str(text))
+    _speak_queue.put(text_clean)
     if block:
         _speak_queue.join()
 
