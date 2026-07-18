@@ -71,6 +71,16 @@ VOSK_MODEL_NAME: str = _voice.get("vosk_model", "vosk-model-small-en-us-0.15")
 SLEEP_ON_IDLE_MINUTES: int = _voice.get("sleep_on_idle_minutes", 0)
 PUSH_TO_TALK_KEY: str = _voice.get("push_to_talk_key", "ctrl+shift+j")
 
+# Phase 1 — Voice System Hardening settings
+MULTI_MIC_FAILOVER: bool = _voice.get("multi_mic_failover", True)
+PREFERRED_MIC_INDEX: int | None = _voice.get("preferred_mic_index", None)
+INTERRUPTION_ENABLED: bool = _voice.get("interruption_enabled", True)
+CONFIDENCE_HIGH_THRESHOLD: float = _voice.get("confidence_high_threshold", 0.65)
+CONFIDENCE_MEDIUM_THRESHOLD: float = _voice.get("confidence_medium_threshold", 0.40)
+IDLE_POWER_SAVE_MINUTES: int = _voice.get("idle_power_save_minutes", 10)
+VAD_MODE: str = _voice.get("vad_mode", "multi_feature")  # multi_feature or energy_only
+NOISE_SUPPRESSION: str = _voice.get("noise_suppression", "spectral")  # spectral or highpass
+
 # ─── Audio / Waveform ───────────────────────────────────
 _audio = _settings.get("audio", {})
 SAMPLING_RATE: int = _audio.get("sampling_rate", 16000)
@@ -135,3 +145,27 @@ THEME: dict[str, str] = {
     "radar_sweep":  _theme_data.get("radar_sweep", "#00eaff"),
     "border":       _theme_data.get("border", "#0a3040"),
 }
+
+
+# ─── Dynamic Settings Access ───────────────────────────
+def get_setting(key: str, default: Any = None) -> Any:
+    """
+    Get a setting value by dot-separated key path.
+
+    Examples:
+        get_setting("voice.tts_rate", 200)
+        get_setting("idle_power_save_minutes", 10)
+
+    For flat keys, searches all sections. For dotted keys,
+    searches the specified section first.
+    """
+    if "." in key:
+        section, subkey = key.split(".", 1)
+        section_data = _settings.get(section, {})
+        return section_data.get(subkey, default)
+    else:
+        # Search all sections
+        for section_data in _settings.values():
+            if isinstance(section_data, dict) and key in section_data:
+                return section_data[key]
+        return default

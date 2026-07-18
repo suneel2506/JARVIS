@@ -32,8 +32,16 @@ _on_wake_callback: Optional[Callable] = None
 
 # Detection parameters
 _threshold = 0.5
-_cooldown = 2.0  # seconds between wake detections
+_cooldown = 2.0  # seconds between wake detections (idle)
+_cooldown_active = 0.5  # shorter cooldown during active conversation
 _last_detection = 0.0
+_in_conversation = False  # Set by listener when in active conversation
+
+# Expanded wake phrases for text-based detection
+_WAKE_PHRASES = [
+    "jarvis", "hey jarvis", "yo jarvis", "okay jarvis",
+    "hey j", "hey jay",
+]
 
 
 class OpenWakeWordEngine:
@@ -166,6 +174,17 @@ def is_openwakeword() -> bool:
     return isinstance(_engine, OpenWakeWordEngine)
 
 
+def set_conversation_active(active: bool) -> None:
+    """Set conversation state for adaptive cooldown."""
+    global _in_conversation
+    _in_conversation = active
+
+
+def _get_current_cooldown() -> float:
+    """Get the current cooldown based on conversation state."""
+    return _cooldown_active if _in_conversation else _cooldown
+
+
 def detect_from_audio(audio_chunk: np.ndarray) -> bool:
     """
     Process an audio chunk for wake word detection (OpenWakeWord path).
@@ -185,9 +204,9 @@ def detect_from_audio(audio_chunk: np.ndarray) -> bool:
         if _paused:
             return False
 
-    # Cooldown check
+    # Adaptive cooldown check
     now = time.time()
-    if now - _last_detection < _cooldown:
+    if now - _last_detection < _get_current_cooldown():
         return False
 
     result = _engine.process_audio(audio_chunk)
@@ -201,6 +220,9 @@ def detect_from_text(text: str) -> bool:
     """
     Check transcribed text for wake word (Vosk fallback path).
 
+    Supports expanded wake phrases including short forms ("J", "Hey J")
+    for faster activation during active conversation.
+
     Args:
         text: Transcribed speech text.
 
@@ -212,24 +234,30 @@ def detect_from_text(text: str) -> bool:
     if not _available:
         return False
 
-    # Cooldown
+    # Adaptive cooldown
     now = time.time()
-    if now - _last_detection < _cooldown:
+    if now - _last_detection < _get_current_cooldown():
         return False
+
+    text_lower = text.lower().strip()
 
     if isinstance(_engine, VoskSubstringFallback):
         if _engine.check_text(text):
             _last_detection = now
             return True
     elif isinstance(_engine, OpenWakeWordEngine):
-        # If someone calls text-based detection on OWW engine,
-        # fall back to substring matching
+        # Text-based fallback for OWW engine
         from config.config import WAKE_WORDS
-        text_lower = text.lower().strip()
         for ww in WAKE_WORDS:
             if ww in text_lower:
                 _last_detection = now
                 return True
+
+    # Check expanded wake phrases (works with any engine)
+    for phrase in _WAKE_PHRASES:
+        if phrase in text_lower:
+            _last_detection = now
+            return True
 
     return False
 

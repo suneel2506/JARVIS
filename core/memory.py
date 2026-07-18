@@ -93,9 +93,17 @@ class Memory:
                         timestamp TEXT NOT NULL
                     );
 
+                    CREATE TABLE IF NOT EXISTS conversation_summaries (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        summary TEXT NOT NULL,
+                        session_id TEXT DEFAULT '',
+                        created_at TEXT NOT NULL
+                    );
+
                     CREATE INDEX IF NOT EXISTS idx_memory_category ON memory(category);
                     CREATE INDEX IF NOT EXISTS idx_memory_key ON memory(category, key);
                     CREATE INDEX IF NOT EXISTS idx_notes_content ON notes(content);
+                    CREATE INDEX IF NOT EXISTS idx_conv_summaries_session ON conversation_summaries(session_id);
                 """)
                 conn.commit()
                 log.info("Memory database initialized: %s", self._db_path)
@@ -191,6 +199,12 @@ class Memory:
                 conn.commit()
             finally:
                 conn.close()
+        # Emit on event bus
+        try:
+            from core.event_bus import bus, Events
+            bus.emit(Events.MEMORY_UPDATED, category=category, key=key)
+        except Exception:
+            pass
 
     def _get(self, category: str, key: str) -> Optional[str]:
         """Get a value from memory."""
@@ -616,6 +630,74 @@ class Memory:
             finally:
                 conn.close()
         return "Conversation history cleared."
+
+    # ─── Conversation Summaries ──────────────────────────
+
+    def save_conversation_summary(self, summary: str, session_id: str = "") -> None:
+        """Store a conversation summary for long-term recall."""
+        now = datetime.now().isoformat()
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    "INSERT INTO conversation_summaries (summary, session_id, created_at) VALUES (?,?,?)",
+                    (summary, session_id, now),
+                )
+                conn.commit()
+            except sqlite3.OperationalError:
+                # Table might not exist yet (schema migration)
+                try:
+                    conn.execute("""
+                        CREATE TABLE IF NOT EXISTS conversation_summaries (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            summary TEXT NOT NULL,
+                            session_id TEXT DEFAULT '',
+                            created_at TEXT NOT NULL
+                        )
+                    """)
+                    conn.execute(
+                        "INSERT INTO conversation_summaries (summary, session_id, created_at) VALUES (?,?,?)",
+                        (summary, session_id, now),
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
+            finally:
+                conn.close()
+        log.info("Conversation summary saved (session: %s)", session_id[:8])
+
+    def get_conversation_summaries(self, limit: int = 5) -> list[dict]:
+        """Get recent conversation summaries for context injection."""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                rows = conn.execute(
+                    "SELECT summary, session_id, created_at FROM conversation_summaries "
+                    "ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                return [
+                    {"summary": r["summary"], "session_id": r["session_id"],
+                     "created_at": r["created_at"]}
+                    for r in reversed(rows)
+                ]
+            except sqlite3.OperationalError:
+                return []  # Table doesn't exist yet
+            finally:
+                conn.close()
+
+    def clear_conversation_summaries(self) -> str:
+        """Clear all conversation summaries."""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("DELETE FROM conversation_summaries")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+            finally:
+                conn.close()
+        return "Conversation summaries cleared."
 
     # ─── App Usage Tracking ──────────────────────────────
 

@@ -6,10 +6,12 @@ explicitly shuts down. If errors occur, it recovers with exponential backoff.
 
 Features:
 - Always-on wake word detection (OpenWakeWord / Vosk)
-- Low-confidence retry ("Sorry sir, could you repeat that?")
-- Mic auto-recovery with exponential backoff
+- Natural interruption handling — speaks while JARVIS is talking → stops TTS
+- 3-tier confidence scoring (high→execute, medium→echo+confirm, low→repeat)
+- Mic auto-recovery with exponential backoff + automatic failover
+- OS sleep/lid-close recovery with auto-recalibration
+- Idle-to-low-power transition (reduce polling after configurable idle period)
 - Watchdog timer that restarts dead loops
-- Auto-recalibrate ambient noise after sleep exit
 - Silence tracking and idle time logging
 - Recognition retry with adjusted parameters
 - Three listen modes: wake_word, continuous, push_to_talk
@@ -58,14 +60,23 @@ _vosk_available = False
 _wake_loop_alive = threading.Event()
 _last_wake_check = 0.0
 
-# ─── Confidence threshold ──────────────────────────────
-CONFIDENCE_THRESHOLD = 0.4  # Below this → ask to repeat
+# ─── Confidence thresholds (3-tier) ────────────────────
+CONFIDENCE_HIGH = 0.65    # Execute immediately
+CONFIDENCE_MEDIUM = 0.40  # Echo back and confirm
+CONFIDENCE_LOW = 0.25     # Ask to repeat entirely
 
 # ─── Diagnostics ────────────────────────────────────────
 _last_confidence: float = 0.0
 _idle_since: float = 0.0
 _total_commands: int = 0
 _total_retries: int = 0
+
+# ─── Power saving ──────────────────────────────────────
+_idle_power_save_minutes: int = 10  # Enter low-power after this idle time
+_power_save_active: bool = False
+
+# ─── OS sleep recovery ─────────────────────────────────
+_last_activity_timestamp: float = 0.0
 
 
 def _init_vosk() -> bool:
@@ -99,14 +110,22 @@ def _init_vosk() -> bool:
 # ─── State Management ───────────────────────────────────
 
 def set_state(state: str) -> None:
-    """Update the current listener state and notify callbacks."""
+    """Update the current listener state and notify callbacks + event bus."""
     global _current_state
+    prev = _current_state
     _current_state = state
     if _on_state_change_callback:
         try:
             _on_state_change_callback(state)
         except Exception:
             pass
+    # Emit on event bus
+    try:
+        from core.event_bus import bus, Events
+        from core.state_machine import machine
+        machine.set_state(state)  # normalizes legacy names
+    except Exception:
+        pass
 
 
 def get_state() -> str:
@@ -160,9 +179,11 @@ def get_diagnostics() -> dict:
         "idle_seconds": int(time.time() - _idle_since) if _idle_since else 0,
         "total_commands": _total_commands,
         "total_retries": _total_retries,
+        "power_save": _power_save_active,
         "mic_device": mic.get("device_name", "Unknown"),
         "mic_healthy": mic.get("healthy", False),
         "ambient_noise": mic.get("ambient_noise", 0),
+        "available_mics": mic.get("available_mics", 0),
     }
 
 
@@ -182,9 +203,11 @@ def exit_sleep() -> None:
 
     # Recalibrate ambient noise after sleep
     try:
-        from core.mic import calibrate
+        from core.mic import calibrate, detect_microphone
+        # Re-detect mic in case it changed during sleep
+        detect_microphone()
         calibrate(duration=0.5)
-        log.info("Ambient noise recalibrated after sleep exit")
+        log.info("Mic re-detected and noise recalibrated after sleep exit")
     except Exception:
         pass
 
@@ -194,6 +217,120 @@ def exit_sleep() -> None:
 def is_sleeping() -> bool:
     """Check if the listener is in sleep mode."""
     return sleep_event.is_set()
+
+
+# ─── Interruption Handling ──────────────────────────────
+
+def check_interruption() -> bool:
+    """
+    Check if the user is speaking while JARVIS is talking.
+    If so, interrupt TTS and switch to listening mode.
+
+    Returns:
+        True if an interruption was detected and handled.
+    """
+    try:
+        from core.speaker import is_speaking, stop_speaking
+        if not is_speaking():
+            return False
+
+        # Quick energy check from the audio stream
+        with _waveform_lock:
+            recent = _waveform_levels[-4:]  # Last ~400ms
+
+        avg_energy = sum(recent) / max(len(recent), 1)
+
+        # If energy is significantly above ambient, user is speaking
+        from core.mic import get_ambient_noise
+        ambient = get_ambient_noise()
+        threshold = max(ambient * 2.5, 0.02)  # Dynamic threshold
+
+        if avg_energy > threshold:
+            log.info("Interruption detected (energy: %.4f, threshold: %.4f) — stopping TTS",
+                     avg_energy, threshold)
+            stop_speaking()
+            return True
+
+    except Exception as e:
+        log.debug("Interruption check error: %s", e)
+
+    return False
+
+
+# ─── OS Sleep Recovery ──────────────────────────────────
+
+def _detect_os_sleep_wake() -> bool:
+    """
+    Detect if the system just woke from OS sleep/hibernate.
+    Uses a time gap heuristic — if the gap between ticks is > 5s,
+    the system was likely sleeping.
+
+    Returns:
+        True if an OS wake event was detected.
+    """
+    global _last_activity_timestamp
+
+    now = time.time()
+    if _last_activity_timestamp == 0:
+        _last_activity_timestamp = now
+        return False
+
+    gap = now - _last_activity_timestamp
+    _last_activity_timestamp = now
+
+    if gap > 5.0:
+        log.info("OS sleep/wake detected (gap: %.1fs) — recalibrating...", gap)
+        return True
+
+    return False
+
+
+def _handle_os_wake() -> None:
+    """Handle recovery after OS sleep/lid-open."""
+    try:
+        from core.mic import detect_microphone, calibrate, enumerate_microphones
+
+        # Re-enumerate devices (USB mics may have reconnected)
+        enumerate_microphones()
+
+        # Re-detect the best mic
+        detect_microphone()
+
+        # Recalibrate ambient noise
+        calibrate(duration=0.5)
+
+        log.info("OS wake recovery complete — mic and noise recalibrated")
+    except Exception as e:
+        log.warning("OS wake recovery error: %s", e)
+
+
+# ─── Power Saving ───────────────────────────────────────
+
+def _check_power_save() -> float:
+    """
+    Check if we should enter low-power mode and return the sleep duration.
+
+    Returns:
+        Sleep duration in seconds (longer = power saving active).
+    """
+    global _power_save_active
+
+    if _idle_since == 0:
+        return 0.3
+
+    idle_seconds = time.time() - _idle_since
+    idle_minutes = idle_seconds / 60.0
+
+    if idle_minutes > _idle_power_save_minutes:
+        if not _power_save_active:
+            _power_save_active = True
+            log.info("Entering low-power mode (idle for %.0f minutes)", idle_minutes)
+        return 1.0  # Poll every 1s instead of 0.3s
+    else:
+        if _power_save_active:
+            _power_save_active = False
+            log.info("Exiting low-power mode")
+        return 0.3  # Normal polling
 
 
 # ─── Audio Stream for Waveform Visualization ────────────
@@ -270,8 +407,10 @@ def _wake_loop() -> None:
     IMMORTAL — never dies unless terminate_event is set.
     On error, recovers with exponential backoff (0.5s → 10s cap).
     Detects mic disconnection and attempts re-init.
+    Detects OS sleep/wake and recalibrates.
+    Reduces polling in idle for power saving.
     """
-    global _idle_since
+    global _idle_since, _last_activity_timestamp
 
     from core.mic import listen_with_sounddevice, detect_microphone
 
@@ -279,6 +418,7 @@ def _wake_loop() -> None:
     set_state(STATE_WAKE_LISTENING)
     _wake_loop_alive.set()
     _idle_since = time.time()
+    _last_activity_timestamp = time.time()
 
     backoff = 0.5
     max_backoff = 10.0
@@ -289,6 +429,10 @@ def _wake_loop() -> None:
     log.info("Wake-word loop started (immortal). Mode: %s", _listen_mode)
 
     while not terminate_event.is_set():
+        # OS sleep/wake detection
+        if _detect_os_sleep_wake():
+            _handle_os_wake()
+
         # Sleep mode check
         if sleep_event.is_set():
             time.sleep(1.0)
@@ -301,16 +445,21 @@ def _wake_loop() -> None:
 
         # Skip if actively listening for a command
         if listening_event.is_set():
-            time.sleep(0.3)
+            sleep_duration = _check_power_save()
+            time.sleep(sleep_duration)
             continue
+
+        # Check for user interruption (speaking while JARVIS talks)
+        check_interruption()
 
         # Heartbeat logging
         now = time.time()
         if now - last_heartbeat > heartbeat_interval:
             last_heartbeat = now
-            log.info("Wake loop alive — mode: %s, errors: %d, idle: %ds",
+            log.info("Wake loop alive — mode: %s, errors: %d, idle: %ds, power_save: %s",
                      _listen_mode, consecutive_errors,
-                     int(now - _idle_since))
+                     int(now - _idle_since),
+                     "on" if _power_save_active else "off")
             consecutive_errors = 0
 
         # Listen for audio
@@ -391,8 +540,12 @@ def listen_for_command() -> str:
     Listen for a single voice command after wake-word activation.
 
     Features:
-    - Confidence-based retry: if confidence < threshold, ask to repeat
+    - 3-tier confidence scoring:
+      • HIGH (≥0.65): Execute immediately
+      • MEDIUM (0.40-0.65): Echo back and confirm ("Did you say...?")
+      • LOW (<0.40): Ask to repeat entirely
     - Recognition retry: on empty result, retry once with longer timeout
+    - Natural interruption support: user can interrupt JARVIS
     - Conversation-ready: returns clean text for executor
     """
     global _last_confidence, _idle_since, _total_commands, _total_retries
@@ -412,7 +565,7 @@ def listen_for_command() -> str:
     set_state(STATE_ACTIVE_LISTENING)
     listening_event.set()
 
-    max_attempts = 2  # Original + 1 retry
+    max_attempts = 3  # Original + 2 retries
 
     for attempt in range(max_attempts):
         try:
@@ -430,18 +583,65 @@ def listen_for_command() -> str:
             _last_confidence = confidence
 
             if text:
-                # Low confidence — ask to repeat
-                if confidence < CONFIDENCE_THRESHOLD and attempt == 0:
-                    log.info("Low confidence (%.2f) for: '%s' — requesting repeat",
+                # ─── 3-Tier Confidence Scoring ───────────
+                if confidence >= CONFIDENCE_HIGH:
+                    # HIGH: Execute immediately
+                    log.info("Heard (HIGH conf %.2f): '%s'", confidence, text)
+                    _total_commands += 1
+                    _idle_since = time.time()
+                    return text
+
+                elif confidence >= CONFIDENCE_MEDIUM:
+                    # MEDIUM: Echo back and confirm
+                    log.info("Heard (MEDIUM conf %.2f): '%s' — confirming...",
                              confidence, text)
                     from core.speaker import speak
-                    speak("Sorry sir, could you repeat that?", block=True)
-                    continue  # Retry
+                    speak(f"Did you say: {text}?", block=True)
 
-                log.info("Heard: '%s' (confidence: %.2f)", text, confidence)
-                _total_commands += 1
-                _idle_since = time.time()
-                return text
+                    # Listen for yes/no confirmation
+                    try:
+                        confirm_audio = listen_with_sounddevice(
+                            recognizer, timeout=4, phrase_time_limit=3,
+                        )
+                        confirm_text, _ = _recognize_audio(recognizer, confirm_audio)
+                        confirm_lower = confirm_text.lower().strip()
+
+                        affirmatives = {"yes", "yeah", "yep", "yup", "correct",
+                                        "that's right", "right", "affirmative",
+                                        "exactly", "sure", "ok", "okay"}
+
+                        if any(a in confirm_lower for a in affirmatives):
+                            log.info("Confirmed: '%s'", text)
+                            _total_commands += 1
+                            _idle_since = time.time()
+                            return text
+                        else:
+                            log.info("User did not confirm: '%s' — retrying", text)
+                            speak("Let me try again. Go ahead, sir.", block=True)
+                            continue
+
+                    except (sr.WaitTimeoutError, sr.UnknownValueError):
+                        # No confirmation → treat as confirmed (common UX pattern)
+                        log.info("No confirmation response — executing: '%s'", text)
+                        _total_commands += 1
+                        _idle_since = time.time()
+                        return text
+
+                else:
+                    # LOW: Ask to repeat
+                    if attempt < max_attempts - 1:
+                        log.info("Low confidence (%.2f) for: '%s' — requesting repeat",
+                                 confidence, text)
+                        from core.speaker import speak
+                        speak("Sorry sir, could you repeat that?", block=True)
+                        continue
+                    else:
+                        # Last attempt — accept whatever we got
+                        log.info("Last attempt — accepting low conf: '%s' (%.2f)",
+                                 text, confidence)
+                        _total_commands += 1
+                        _idle_since = time.time()
+                        return text
 
         except sr.WaitTimeoutError:
             if attempt == 0:
@@ -512,17 +712,45 @@ def _watchdog_loop() -> None:
             time.sleep(5)
 
 
+# ─── Interruption Monitor ──────────────────────────────
+
+def _interruption_monitor_loop() -> None:
+    """
+    Background thread that continuously checks for user interruptions.
+    Runs only when JARVIS is speaking, checking every 100ms.
+    """
+    while not terminate_event.is_set():
+        try:
+            from core.speaker import is_speaking
+            if is_speaking() and not listening_event.is_set():
+                if check_interruption():
+                    # Interruption handled — activate listening
+                    log.info("Interruption handled — activating wake event")
+                    wake_event.set()
+            time.sleep(0.1)
+        except Exception:
+            time.sleep(0.5)
+
+
 # ─── Start / Stop ───────────────────────────────────────
 
 def start_listener() -> None:
     """Start the voice listener (mic detection + wake loop + command capture + watchdog)."""
-    global _listen_mode, _idle_since
+    global _listen_mode, _idle_since, _idle_power_save_minutes
     from config.config import LISTEN_MODE
     _listen_mode = LISTEN_MODE
     _idle_since = time.time()
 
-    # Auto-detect microphone
-    from core.mic import detect_microphone, calibrate
+    # Load power-save config
+    try:
+        from config.config import get_setting
+        _idle_power_save_minutes = get_setting("idle_power_save_minutes", 10)
+    except Exception:
+        pass
+
+    # Auto-detect microphone (with multi-mic enumeration)
+    from core.mic import detect_microphone, calibrate, enumerate_microphones
+    enumerate_microphones()
     idx, name = detect_microphone()
     log.info("Using microphone: %s (index: %s)", name, idx)
 
@@ -554,6 +782,8 @@ def start_listener() -> None:
     threading.Thread(target=_wake_loop, daemon=True, name="WakeLoop").start()
     threading.Thread(target=_command_capture_loop, daemon=True, name="CommandCapture").start()
     threading.Thread(target=_watchdog_loop, daemon=True, name="Watchdog").start()
+    threading.Thread(target=_interruption_monitor_loop, daemon=True,
+                     name="InterruptionMonitor").start()
 
     log.info("Listener started — Vosk: %s, Mode: %s, Mic: %s",
              "enabled" if _vosk_available else "disabled", _listen_mode, name)

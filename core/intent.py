@@ -8,8 +8,12 @@ Instead of requiring exact "open chrome", understands:
 - "Start Chrome please"
 - "Open the web browser for me"
 
-Uses keyword scoring + synonym expansion — no ML required.
-Falls through to AI classification for truly ambiguous commands.
+Features:
+- Keyword scoring + synonym expansion — no ML required
+- Contextual re-ranking (boosts intents related to recent conversation)
+- Multi-part command parsing ("open Chrome and play music")
+- Implicit intent detection ("I'm tired" → dim screen / sleep mode)
+- Falls through to AI classification for truly ambiguous commands
 """
 import re
 from typing import Optional
@@ -112,6 +116,35 @@ FILLER_WORDS = {
     "be", "get", "hey", "jarvis", "sir",
 }
 
+# ─── Implicit Intent Patterns ───────────────────────────
+# Maps casual phrases to action intents
+IMPLICIT_INTENTS: dict[str, dict] = {
+    "i'm tired": {"action": "sleep", "response": "Understood, sir. Dimming down."},
+    "i'm bored": {"action": "suggest", "response": "Perhaps I can suggest something to explore."},
+    "good morning": {"action": "greet_morning", "response": None},
+    "good night": {"action": "greet_night", "response": None},
+    "good evening": {"action": "greet_evening", "response": None},
+    "thank you": {"action": "acknowledge", "response": "At your service, sir."},
+    "thanks": {"action": "acknowledge", "response": "My pleasure, sir."},
+    "thanks jarvis": {"action": "acknowledge", "response": "Always, sir."},
+    "great job": {"action": "acknowledge", "response": "Much appreciated, sir."},
+    "well done": {"action": "acknowledge", "response": "Thank you, sir."},
+    "never mind": {"action": "cancel", "response": "Understood. Standing by."},
+    "forget it": {"action": "cancel", "response": "Consider it forgotten, sir."},
+    "that's all": {"action": "dismiss", "response": "Very well, sir. I'll be here if you need me."},
+    "i'm back": {"action": "welcome_back", "response": None},
+    "who are you": {"action": "identity", "response": "I am J.A.R.V.I.S. — Just A Rather Very Intelligent System. At your service, sir."},
+    "what can you do": {"action": "capabilities", "response": None},
+    "how are you": {"action": "status_self", "response": "All systems operational, sir. Running at optimal capacity."},
+}
+
+# ─── Multi-part command separators ──────────────────────
+_COMMAND_SEPARATORS = [" and then ", " and also ", " then ", " also ", " and "]
+
+# ─── Contextual re-ranking state ────────────────────────
+_recent_actions: list[str] = []
+_MAX_RECENT_ACTIONS = 5
+
 
 # ═══════════════════════════════════════════════════════════
 # Intent Classification
@@ -121,12 +154,15 @@ class Intent:
     """Represents a classified user intent."""
 
     def __init__(self, action: str, target: str, raw: str,
-                 confidence: float = 0.0, params: Optional[dict] = None):
+                 confidence: float = 0.0, params: Optional[dict] = None,
+                 implicit: bool = False, response: Optional[str] = None):
         self.action = action
         self.target = target
         self.raw = raw
         self.confidence = confidence
         self.params = params or {}
+        self.implicit = implicit
+        self.response = response  # Pre-baked response for implicit intents
 
     def __repr__(self):
         return f"Intent(action='{self.action}', target='{self.target}', conf={self.confidence:.2f})"
@@ -196,11 +232,104 @@ def _score_match(tokens: list[str], candidates: list[str]) -> float:
     return best_score
 
 
+def _contextual_boost(action: str) -> float:
+    """
+    Boost score for actions related to recent context.
+
+    If the user just opened an app, they're more likely to want to
+    switch/close/maximize next than to search the web.
+    """
+    if not _recent_actions:
+        return 0.0
+
+    # Contextual relationships
+    relationships = {
+        "open": {"close": 0.05, "switch": 0.05, "maximize": 0.03},
+        "close": {"open": 0.05},
+        "search": {"open": 0.03},
+        "play": {"pause": 0.05, "next": 0.05, "volume_up": 0.03, "volume_down": 0.03},
+        "pause": {"play": 0.05},
+    }
+
+    boost = 0.0
+    for recent in _recent_actions[-3:]:
+        related = relationships.get(recent, {})
+        if action in related:
+            boost += related[action]
+
+    return min(boost, 0.1)  # Cap contextual boost
+
+
+def _record_action(action: str) -> None:
+    """Record an action for contextual re-ranking."""
+    _recent_actions.append(action)
+    if len(_recent_actions) > _MAX_RECENT_ACTIONS:
+        _recent_actions.pop(0)
+
+
+def check_implicit_intent(text: str) -> Optional[Intent]:
+    """
+    Check for implicit intents — casual phrases that map to actions.
+
+    Examples:
+    - "I'm tired" → sleep/dim
+    - "Thanks" → acknowledgment
+    - "Good morning" → greeting
+    - "Who are you" → identity
+    """
+    text_lower = text.lower().strip()
+
+    for pattern, info in IMPLICIT_INTENTS.items():
+        if pattern in text_lower or text_lower == pattern:
+            return Intent(
+                action=info["action"],
+                target="",
+                raw=text,
+                confidence=0.9,
+                implicit=True,
+                response=info.get("response"),
+            )
+
+    return None
+
+
+def split_multi_command(text: str) -> list[str]:
+    """
+    Split a multi-part command into individual commands.
+
+    "Open Chrome and play some music" → ["Open Chrome", "play some music"]
+    "Close notepad then open vscode" → ["Close notepad", "open vscode"]
+    """
+    text_lower = text.lower()
+
+    # Try each separator (longest first to avoid partial matches)
+    for sep in _COMMAND_SEPARATORS:
+        if sep in text_lower:
+            parts = []
+            # Split while preserving case from original
+            idx = 0
+            remaining = text
+            while True:
+                sep_idx = remaining.lower().find(sep)
+                if sep_idx == -1:
+                    parts.append(remaining.strip())
+                    break
+                parts.append(remaining[:sep_idx].strip())
+                remaining = remaining[sep_idx + len(sep):]
+            parts = [p for p in parts if p]
+            if len(parts) > 1:
+                log.info("Multi-command split: '%s' → %s", text, parts)
+                return parts
+
+    return [text]
+
+
 def classify(text: str) -> Optional[Intent]:
     """
     Classify a natural language command into an Intent.
 
     Uses keyword scoring + synonym expansion to understand flexible phrasing.
+    Applies contextual re-ranking based on recent actions.
 
     Returns:
         Intent object if classified with reasonable confidence, else None.
@@ -215,12 +344,18 @@ def classify(text: str) -> Optional[Intent]:
     if not tokens:
         return None
 
+    # Check implicit intents first
+    implicit = check_implicit_intent(raw)
+    if implicit:
+        return implicit
+
     # Score each action
     best_action = None
     best_action_score = 0.0
 
     for action, synonyms in ACTION_SYNONYMS.items():
         score = _score_match(raw.split(), synonyms)
+        score += _contextual_boost(action)  # Contextual re-ranking
         if score > best_action_score:
             best_action_score = score
             best_action = action
@@ -276,6 +411,7 @@ def classify(text: str) -> Optional[Intent]:
         )
 
         if confidence >= 0.4:
+            _record_action(best_action)
             log.info("Intent classified: %s (target: %s, conf: %.2f)",
                      best_action, best_target, confidence)
             return intent

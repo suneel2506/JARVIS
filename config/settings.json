@@ -15,7 +15,15 @@
         "use_vosk_offline": true,
         "vosk_model": "vosk-model-small-en-us-0.15",
         "sleep_on_idle_minutes": 0,
-        "push_to_talk_key": "ctrl+shift+j"
+        "push_to_talk_key": "ctrl+shift+j",
+        "multi_mic_failover": true,
+        "preferred_mic_index": null,
+        "interruption_enabled": true,
+        "confidence_high_threshold": 0.65,
+        "confidence_medium_threshold": 0.40,
+        "idle_power_save_minutes": 10,
+        "vad_mode": "multi_feature",
+        "noise_suppression": "spectral"
     },
     "audio": {
         "sampling_rate": 16000,

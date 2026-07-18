@@ -9,6 +9,12 @@ The active backend is selected by config: "tts_engine": "piper" or "pyttsx3"
 If the preferred backend fails to initialize, it falls back automatically.
 
 Thread-safe speech queue with state callbacks for UI integration.
+
+Upgrades:
+- is_speaking() — exposes current speaking state (fixes system_info.py bug)
+- stop_speaking() — halt TTS mid-sentence and clear queue (interruption support)
+- Priority queue — urgent messages (battery critical, errors) jump ahead
+- Interrupt event — allows immediate cancellation of ongoing speech
 """
 import os
 import io
@@ -25,11 +31,23 @@ from core.logger import get_logger
 
 log = get_logger("core.speaker")
 
-_speak_queue: queue.Queue = queue.Queue()
+_speak_queue: queue.PriorityQueue = queue.PriorityQueue()
 _speak_thread: Optional[threading.Thread] = None
 _shutdown = threading.Event()
+_interrupt = threading.Event()  # Set to interrupt current speech
 _on_speaking_callback: Optional[Callable] = None
 _backend = None
+
+# ─── Speaking State (thread-safe) ───────────────────────
+_speaking_lock = threading.Lock()
+_is_speaking: bool = False
+_speech_counter: int = 0  # Monotonic counter for queue ordering
+
+# ─── Priority Levels ───────────────────────────────────
+PRIORITY_URGENT = 0    # Battery critical, errors — spoken immediately
+PRIORITY_HIGH = 1      # Confirmations, acknowledgments
+PRIORITY_NORMAL = 2    # Standard speech
+PRIORITY_LOW = 3       # Background info, non-essential
 
 
 def set_on_speaking(callback: Callable[[bool], None]) -> None:
@@ -41,6 +59,36 @@ def set_on_speaking(callback: Callable[[bool], None]) -> None:
     """
     global _on_speaking_callback
     _on_speaking_callback = callback
+
+
+def is_speaking() -> bool:
+    """Check if JARVIS is currently speaking (thread-safe)."""
+    with _speaking_lock:
+        return _is_speaking
+
+
+def _set_speaking(state: bool) -> None:
+    """Update speaking state and fire callback + event bus."""
+    global _is_speaking
+    with _speaking_lock:
+        _is_speaking = state
+    if _on_speaking_callback:
+        try:
+            _on_speaking_callback(state)
+        except Exception:
+            pass
+    # Emit on event bus
+    try:
+        from core.event_bus import bus, Events
+        from core.state_machine import machine, States
+        if state:
+            bus.emit(Events.SPEAK_START, text="")
+            machine.set_state(States.SPEAKING)
+        else:
+            bus.emit(Events.SPEAK_END, text="")
+            machine.set_state(States.IDLE)
+    except Exception:
+        pass
 
 
 # ═══════════════════════════════════════════════════════════
@@ -160,7 +208,13 @@ class PiperTTSBackend(TTSBackend):
             audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
 
         sd.play(audio, samplerate=rate)
-        sd.wait()
+        # Interruptible wait — check every 50ms
+        while sd.get_stream().active:
+            if _interrupt.is_set():
+                sd.stop()
+                log.info("Speech interrupted (Piper Python API)")
+                return
+            _interrupt.wait(timeout=0.05)
 
     def _speak_cli(self, text: str) -> None:
         """Generate speech using Piper CLI executable."""
@@ -177,10 +231,19 @@ class PiperTTSBackend(TTSBackend):
             raw_audio, _ = self._process.communicate(input=text.encode("utf-8"), timeout=30)
             self._process = None
 
+            if _interrupt.is_set():
+                return
+
             if raw_audio:
                 audio = np.frombuffer(raw_audio, dtype=np.int16).astype(np.float32) / 32768.0
                 sd.play(audio, samplerate=self._rate)
-                sd.wait()
+                # Interruptible wait
+                while sd.get_stream().active:
+                    if _interrupt.is_set():
+                        sd.stop()
+                        log.info("Speech interrupted (Piper CLI)")
+                        return
+                    _interrupt.wait(timeout=0.05)
         except subprocess.TimeoutExpired:
             if self._process:
                 self._process.kill()
@@ -292,18 +355,25 @@ def _speak_worker() -> None:
 
     while not _shutdown.is_set():
         try:
-            text = _speak_queue.get(timeout=0.5)
+            priority, counter, text = _speak_queue.get(timeout=0.5)
             if text is None:
                 break  # Poison pill — shutdown signal
+
+            # Skip if interrupted before we even started
+            if _interrupt.is_set():
+                _interrupt.clear()
+                _speak_queue.task_done()
+                continue
+
             try:
-                if _on_speaking_callback:
-                    _on_speaking_callback(True)
+                _set_speaking(True)
                 _backend.speak_text(text)
             except Exception as e:
                 log.error("TTS error: %s", e)
             finally:
-                if _on_speaking_callback:
-                    _on_speaking_callback(False)
+                _set_speaking(False)
+                # Clear interrupt flag after speech completes
+                _interrupt.clear()
             _speak_queue.task_done()
         except queue.Empty:
             continue
@@ -318,7 +388,7 @@ def start_speaker() -> None:
         log.info("Speaker started")
 
 
-def speak(text: str, block: bool = True) -> None:
+def speak(text: str, block: bool = True, priority: int = PRIORITY_NORMAL) -> None:
     """
     Speak text via TTS.
 
@@ -326,7 +396,11 @@ def speak(text: str, block: bool = True) -> None:
         text: The text to speak.
         block: If True, waits until this text is spoken before returning.
                If False, queues the text and returns immediately.
+        priority: Speech priority level (PRIORITY_URGENT, PRIORITY_HIGH,
+                  PRIORITY_NORMAL, PRIORITY_LOW). Lower number = higher priority.
     """
+    global _speech_counter
+
     if not text:
         return
 
@@ -336,15 +410,48 @@ def speak(text: str, block: bool = True) -> None:
         text_clean = text_clean.replace(pattern, "Jarvis")
 
     start_speaker()  # Ensure worker is running
-    _speak_queue.put(text_clean)
+
+    # Monotonic counter preserves FIFO order within same priority
+    _speech_counter += 1
+    _speak_queue.put((priority, _speech_counter, text_clean))
+
     if block:
         _speak_queue.join()
+
+
+def speak_urgent(text: str, block: bool = False) -> None:
+    """Speak an urgent message — jumps ahead of the queue."""
+    speak(text, block=block, priority=PRIORITY_URGENT)
+
+
+def stop_speaking() -> None:
+    """
+    Interrupt current speech and clear the queue.
+    Used when the user speaks while JARVIS is talking.
+    """
+    # Signal the worker to stop current playback
+    _interrupt.set()
+
+    # Clear all pending items from the queue
+    while not _speak_queue.empty():
+        try:
+            _speak_queue.get_nowait()
+            _speak_queue.task_done()
+        except queue.Empty:
+            break
+
+    # Stop the backend immediately
+    if _backend:
+        _backend.stop()
+
+    log.info("Speech interrupted — queue cleared")
 
 
 def stop_speaker() -> None:
     """Shutdown the speaker cleanly."""
     _shutdown.set()
-    _speak_queue.put(None)  # Poison pill
+    _speech_counter_val = 0
+    _speak_queue.put((PRIORITY_URGENT, 0, None))  # Poison pill
     if _backend:
         _backend.stop()
     log.info("Speaker stopped")

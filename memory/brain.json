@@ -7,13 +7,16 @@
     "commands": {},
     "usage": {
         "open cmd": 1,
-        "open youtube": 2,
+        "open youtube": 3,
         "what is mean by uno": 1,
         "but": 1,
         "the": 1,
         "create the folder name of sunil demo in the document section": 1,
         "create folder": 1,
-        "hello": 1
+        "hello": 1,
+        "hey bro": 1,
+        "hey": 1,
+        "hi": 1
     },
     "routines": {},
     "schedules": [],

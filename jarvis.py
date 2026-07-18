@@ -164,17 +164,48 @@ def main():
     start_scheduler(execute)
     register_hotkeys(execute)
 
+    # Start proactive intelligence engine
+    from core.proactive import start_proactive, set_on_notify, record_command
+    def _proactive_notify(title, message):
+        try:
+            hud.show_notification(f"{title}: {message}", "warning")
+        except Exception:
+            pass
+    set_on_notify(_proactive_notify)
+    start_proactive()
+
     # ─── HUD Data Refresh Loop ──────────────────────────
     def _hud_data_loop():
-        """Background thread: refreshes HUD data every second."""
+        """Background thread: refreshes HUD data and emits to event bus every second."""
         while True:
             try:
                 stats = get_stats()
                 from core.listener import get_state
+                from core.speaker import is_speaking
                 stats["mic_state"] = get_state()
+                stats["speaker_active"] = is_speaking()
                 hud.update_system_stats(stats)
                 hud.update_waveform(get_waveform_levels())
                 hud.update_command_log(get_command_log())
+
+                # Emit stats on event bus
+                try:
+                    from core.event_bus import bus, Events
+                    bus.emit(Events.SYSTEM_STATS, stats=stats)
+                except Exception:
+                    pass
+
+                # Feed memory stats and exec stats to HUD
+                try:
+                    from core.memory import get_memory
+                    hud.update_memory_stats(get_memory().get_stats())
+                except Exception:
+                    pass
+                try:
+                    from core.executor import get_exec_stats
+                    hud.update_exec_stats(get_exec_stats())
+                except Exception:
+                    pass
             except Exception:
                 pass
             time.sleep(1)

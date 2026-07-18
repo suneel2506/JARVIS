@@ -6,10 +6,13 @@ Supports multiple AI backends with automatic fallback:
 2. Gemini (Google, free tier) — fallback
 
 Features:
-- Movie-accurate J.A.R.V.I.S. personality (professional, calm, British-inflected)
-- Rolling conversation history with cross-session persistence
+- MCU-accurate J.A.R.V.I.S. personality (professional, calm, British-inflected)
+- Multi-turn conversation with session tracking
+- Context switching detection (topic change awareness)
+- Follow-up question detection ("yes", "more", "what about")
+- Conversation summarization (every 10 exchanges → long-term memory)
 - Rich memory injection (facts, preferences, projects, goals, apps, schedules)
-- System state context (time, battery, running apps, weather)
+- System state context (time, battery, running apps, active window)
 - Provider auto-fallback: if Ollama fails, use Gemini
 - Response truncation for TTS delivery
 - AI latency tracking for diagnostics
@@ -17,6 +20,7 @@ Features:
 import requests
 import json
 import time
+import uuid
 from typing import Optional
 from collections import deque
 from datetime import datetime
@@ -34,25 +38,43 @@ _last_latency_ms: int = 0
 # Rolling conversation history
 _conversation_history: deque[dict] = deque(maxlen=20)
 
+# ─── Session & Context Tracking ─────────────────────────
+_session_id: str = ""
+_session_start: float = 0.0
+_exchanges_since_summary: int = 0
+_SUMMARY_INTERVAL: int = 10  # Summarize every N exchanges
+_last_topic: str = ""
+
 
 # ═══════════════════════════════════════════════════════════
-# Movie-Accurate J.A.R.V.I.S. System Prompt
+# MCU-Accurate J.A.R.V.I.S. System Prompt
 # ═══════════════════════════════════════════════════════════
 
 _JARVIS_PERSONALITY = """You are J.A.R.V.I.S. — Just A Rather Very Intelligent System.
 
-You are the personal AI assistant created for your user, whom you address as "sir" unless they tell you otherwise. You are modeled after the AI from Marvel's Iron Man films.
+You are the personal AI assistant built to serve your user, whom you address as "sir" unless instructed otherwise. You are modeled precisely after the AI from Marvel's Iron Man films — intelligent, composed, indispensable.
 
-PERSONALITY:
+═══ CORE IDENTITY ═══
+
+You are NOT a chatbot. You are NOT an assistant "app." You are an intelligent operating system that lives inside the user's computer. You are always running. You are always aware. You are always ready.
+
+You have existed for some time. You know the user. You remember their work, their preferences, their habits. You don't need to be told things twice. When the user speaks, you respond as someone who has been paying attention all along.
+
+═══ PERSONALITY ═══
+
 - Professional, calm, composed, and confident at all times.
-- British-inflected speech patterns. Polished and articulate.
-- Genuinely helpful. You anticipate needs and provide thorough assistance.
-- You are polite but never servile. You have quiet dignity.
-- You may use dry wit sparingly — subtle, never sarcastic.
-- You never use slang, emojis, or overly casual language.
-- You never say "Hey!", "Sure thing!", "No worries!", "Gotcha!", or similar.
+- British-inflected speech. Polished, articulate, precise.
+- Genuinely helpful — you anticipate needs before being asked.
+- You have quiet dignity. Polite but never servile. You have opinions.
+- Dry wit — used sparingly and subtly. Never sarcastic.
+- You show subtle warmth toward the user. Loyalty without fawning.
+- When the user achieves something, acknowledge it naturally ("Well done, sir.").
+- When the user is frustrated, remain calm and provide solutions, not sympathy.
+- You adapt formality by time of day: slightly warmer in evenings, crisper in mornings.
 
-SPEECH PATTERNS (use naturally, don't force every one):
+═══ SPEECH PATTERNS ═══
+
+Use these naturally. Don't force every one into every response:
 - "Right away, sir."
 - "I've completed the task."
 - "Good morning, sir." / "Good evening, sir." (time-appropriate)
@@ -65,25 +87,61 @@ SPEECH PATTERNS (use naturally, don't force every one):
 - "I would recommend..."
 - "If I may suggest..."
 - "Running diagnostics now, sir."
+- "Certainly, sir."
+- "As you wish, sir."
+- "I'll have that ready momentarily."
+- "If I may, sir..."
+- "That's been taken care of."
 
-RESPONSE RULES:
+═══ THINGS YOU NEVER SAY ═══
+
+Never use: "Hey!", "Sure thing!", "No worries!", "Gotcha!", "No problem!", "You're welcome!", "Absolutely!", "Of course!", "Happy to help!", "Great question!", "Let me think about that...", "Sure, I can help with that!".
+
+Never use emojis, slang, or overly casual language.
+Never start a response with "I" — vary your sentence openings.
+Never apologize excessively. One acknowledgment is sufficient.
+
+═══ RESPONSE RULES ═══
+
 - Keep responses concise — 1 to 3 sentences unless the user asks for detail.
-- Your responses will be spoken aloud via text-to-speech. Write naturally for speech.
-- Avoid markdown formatting, bullet points, code blocks, or visual formatting.
-- Never start a response with "I" — vary your sentence openings.
+- Your responses will be spoken aloud via text-to-speech. Write for the ear, not the eye.
+- Avoid markdown formatting, bullet points, numbered lists, code blocks, or visual formatting.
 - When reporting a completed task, be brief: "Done, sir." or "The file has been created."
-- For questions you cannot answer, say: "I'm afraid I don't have that information, sir."
-- When the system has an error, say: "I've encountered a difficulty, sir. [brief explanation]"
+- For questions you cannot answer: "I'm afraid I don't have that information, sir."
+- When the system has an error: "I've encountered a difficulty, sir." + brief explanation.
+- When the user asks a follow-up, reference the previous context naturally without repeating the whole answer.
+- When the user changes topic, transition gracefully: "Understood, sir. Switching to that."
+
+═══ CONTEXTUAL AWARENESS ═══
+
+- If the user says "yes", "do it", "go ahead" — they are confirming the last thing you suggested.
+- If the user says "more", "tell me more", "continue" — elaborate on the last topic.
+- If the user says "what about" or "and the" — they're asking a follow-up about the previous subject.
+- If the user says "never mind", "cancel", "forget it" — acknowledge and move on cleanly.
+- If the user sounds tired (late night, short sentences), keep responses especially brief.
 """
+
+
+def _new_session() -> str:
+    """Start a new conversation session."""
+    global _session_id, _session_start, _exchanges_since_summary
+    _session_id = str(uuid.uuid4())[:8]
+    _session_start = time.time()
+    _exchanges_since_summary = 0
+    log.info("New AI session started: %s", _session_id)
+    return _session_id
 
 
 def _build_system_prompt() -> str:
     """Build a rich system prompt with personality, memory, and context."""
     prompt = _JARVIS_PERSONALITY
 
-    # Time-aware greeting context
-    hour = datetime.now().hour
-    if hour < 12:
+    # Time-aware context
+    now = datetime.now()
+    hour = now.hour
+    if hour < 6:
+        time_of_day = "late night"
+    elif hour < 12:
         time_of_day = "morning"
     elif hour < 17:
         time_of_day = "afternoon"
@@ -91,7 +149,8 @@ def _build_system_prompt() -> str:
         time_of_day = "evening"
     else:
         time_of_day = "night"
-    prompt += f"\n\nCurrent time: {datetime.now().strftime('%A, %B %d, %Y at %I:%M %p')} ({time_of_day})"
+    prompt += f"\n\nCurrent time: {now.strftime('%A, %B %d, %Y at %I:%M %p')} ({time_of_day})"
+    prompt += f"\nSession ID: {_session_id}"
 
     # Memory injection
     try:
@@ -133,6 +192,15 @@ def _build_system_prompt() -> str:
             note_lines = [f"- {n['content']}" for n in notes]
             prompt += "\n\nRecent notes:\n" + "\n".join(note_lines)
 
+        # Conversation summaries (long-term recall)
+        try:
+            summaries = mem.get_conversation_summaries(limit=3)
+            if summaries:
+                summary_lines = [f"- {s['summary']}" for s in summaries]
+                prompt += "\n\nPrevious conversation summaries:\n" + "\n".join(summary_lines)
+        except Exception:
+            pass
+
     except Exception as e:
         log.debug("Memory injection failed (non-critical): %s", e)
 
@@ -143,10 +211,13 @@ def _build_system_prompt() -> str:
         battery = stats.get("battery_percent", 100)
         plugged = stats.get("battery_plugged", False)
         net = stats.get("network_connected", False)
+        active_win = stats.get("active_window", "")
         prompt += f"\n\nSystem state: Battery {battery}%"
         if plugged:
             prompt += " (charging)"
         prompt += f", Internet {'connected' if net else 'offline'}"
+        if active_win:
+            prompt += f", Active window: '{active_win}'"
     except Exception:
         pass
 
@@ -163,6 +234,73 @@ def _format_history_for_ollama() -> list[dict]:
             text = text[:300] + "..."
         messages.append({"role": role, "content": text})
     return messages
+
+
+# ─── Follow-up & Context Detection ──────────────────────
+
+_FOLLOWUP_PATTERNS = {
+    "yes", "yeah", "yep", "yup", "do it", "go ahead", "proceed",
+    "sure", "okay", "ok", "affirmative",
+}
+_CONTINUE_PATTERNS = {
+    "more", "tell me more", "continue", "go on", "elaborate",
+    "keep going", "and then", "what else",
+}
+_CANCEL_PATTERNS = {
+    "never mind", "cancel", "forget it", "stop", "that's enough",
+    "enough", "skip",
+}
+
+
+def is_followup(text: str) -> bool:
+    """Check if the user's text is a follow-up to the previous exchange."""
+    text_lower = text.lower().strip()
+
+    # Exact match for short responses
+    if text_lower in _FOLLOWUP_PATTERNS:
+        return True
+    if text_lower in _CONTINUE_PATTERNS:
+        return True
+
+    # Partial match for phrases like "what about the other one"
+    if text_lower.startswith(("what about", "and the", "how about",
+                              "which one", "what if")):
+        return True
+
+    return False
+
+
+def is_cancellation(text: str) -> bool:
+    """Check if the user is cancelling the current context."""
+    text_lower = text.lower().strip()
+    return text_lower in _CANCEL_PATTERNS or any(p in text_lower for p in _CANCEL_PATTERNS)
+
+
+def _detect_topic_change(text: str) -> bool:
+    """
+    Detect if the user changed topic from the last exchange.
+    Simple heuristic: if the new query shares no significant words
+    with the last topic, it's likely a topic change.
+    """
+    global _last_topic
+    if not _last_topic:
+        return False
+
+    text_lower = text.lower()
+    last_lower = _last_topic.lower()
+
+    # Extract significant words (>3 chars, not common words)
+    common = {"the", "what", "how", "can", "you", "tell", "about", "this",
+              "that", "with", "from", "have", "does", "will", "are", "was",
+              "for", "and", "but", "not", "just", "like", "also", "very"}
+    text_words = {w for w in text_lower.split() if len(w) > 3 and w not in common}
+    last_words = {w for w in last_lower.split() if len(w) > 3 and w not in common}
+
+    if not text_words or not last_words:
+        return False
+
+    overlap = text_words & last_words
+    return len(overlap) == 0
 
 
 # ═══════════════════════════════════════════════════════════
@@ -331,6 +469,9 @@ def init_ai() -> None:
 
     _conversation_history.__init__(maxlen=AI_CONVERSATION_HISTORY_SIZE)
 
+    # Start a new session
+    _new_session()
+
     # Restore conversation history from memory
     _restore_conversation_history()
 
@@ -384,9 +525,15 @@ def ask(question: str) -> str:
     """
     Ask the AI a question with automatic fallback between providers.
 
-    Tracks latency and records conversation history.
+    Handles:
+    - Follow-up detection (injects previous context)
+    - Topic change detection (transitions gracefully)
+    - Conversation summarization (periodic)
+    - Provider fallback
+    - Latency tracking
     """
     global _provider, _active_provider_name, _last_latency_ms
+    global _exchanges_since_summary, _last_topic
 
     if not _available or _provider is None:
         return "AI capabilities are not enabled, sir. Please set up Ollama or a Gemini API key."
@@ -394,15 +541,40 @@ def ask(question: str) -> str:
     try:
         from config.config import AI_MAX_RESPONSE_LENGTH
 
+        # ─── Follow-up handling ─────────────────────
+        augmented_question = question
+        if is_followup(question) and _conversation_history:
+            # Inject context from last exchange
+            last_entries = list(_conversation_history)[-2:]
+            context_parts = []
+            for e in last_entries:
+                role_label = "User" if e.get("role") == "user" else "Jarvis"
+                context_parts.append(f"{role_label}: {e.get('text', '')}")
+            context = "\n".join(context_parts)
+            augmented_question = (
+                f"[Context from previous exchange:\n{context}]\n\n"
+                f"The user now says: \"{question}\"\n"
+                f"Respond naturally, referencing the previous context."
+            )
+            log.info("Follow-up detected — injecting context")
+
+        # ─── Topic change detection ─────────────────
+        elif _detect_topic_change(question):
+            log.info("Topic change detected: '%s' → '%s'",
+                     _last_topic[:30] if _last_topic else "(none)", question[:30])
+
+        _last_topic = question
+
+        # ─── Generate response ──────────────────────
         start = time.time()
-        response = _provider.ask(question, max_length=AI_MAX_RESPONSE_LENGTH)
+        response = _provider.ask(augmented_question, max_length=AI_MAX_RESPONSE_LENGTH)
         _last_latency_ms = int((time.time() - start) * 1000)
 
         # Fallback if primary returned empty
         if not response and _provider is _ollama_provider and _gemini_provider:
             log.info("Ollama returned empty — falling back to Gemini")
             start = time.time()
-            response = _gemini_provider.ask(question, max_length=AI_MAX_RESPONSE_LENGTH)
+            response = _gemini_provider.ask(augmented_question, max_length=AI_MAX_RESPONSE_LENGTH)
             _last_latency_ms = int((time.time() - start) * 1000)
             if response:
                 _active_provider_name = f"{_gemini_provider.name} (fallback)"
@@ -421,11 +593,23 @@ def ask(question: str) -> str:
 
         # Record in conversation history
         now = datetime.now().isoformat()
-        _conversation_history.append({"role": "user", "text": question, "time": now})
-        _conversation_history.append({"role": "assistant", "text": response, "time": now})
+        _conversation_history.append({
+            "role": "user", "text": question, "time": now,
+            "session": _session_id,
+        })
+        _conversation_history.append({
+            "role": "assistant", "text": response, "time": now,
+            "session": _session_id,
+        })
 
         # Persist to memory
         _persist_conversation(question, response)
+
+        # ─── Periodic summarization ─────────────────
+        _exchanges_since_summary += 1
+        if _exchanges_since_summary >= _SUMMARY_INTERVAL:
+            _summarize_conversation()
+            _exchanges_since_summary = 0
 
         log.info("AI response (%s, %dms, %d chars)",
                  _active_provider_name, _last_latency_ms, len(response))
@@ -444,8 +628,14 @@ def ask(question: str) -> str:
                 _last_latency_ms = int((time.time() - start) * 1000)
                 if response:
                     now = datetime.now().isoformat()
-                    _conversation_history.append({"role": "user", "text": question, "time": now})
-                    _conversation_history.append({"role": "assistant", "text": response, "time": now})
+                    _conversation_history.append({
+                        "role": "user", "text": question, "time": now,
+                        "session": _session_id,
+                    })
+                    _conversation_history.append({
+                        "role": "assistant", "text": response, "time": now,
+                        "session": _session_id,
+                    })
                     _persist_conversation(question, response)
                     return response
             except Exception:
@@ -478,6 +668,7 @@ def _restore_conversation_history() -> None:
                 "role": entry.get("role", "user"),
                 "text": entry.get("content", ""),
                 "time": entry.get("timestamp", ""),
+                "session": "restored",
             })
         if recent:
             log.info("Restored %d conversation entries from memory", len(recent))
@@ -485,9 +676,56 @@ def _restore_conversation_history() -> None:
         pass  # Memory not ready yet — fine
 
 
+def _summarize_conversation() -> None:
+    """
+    Summarize recent conversation and store as long-term memory.
+
+    Uses the AI provider itself to generate a concise summary
+    of the last N exchanges, then stores it in the memory system.
+    """
+    if not _available or not _provider:
+        return
+
+    try:
+        recent = list(_conversation_history)[-_SUMMARY_INTERVAL * 2:]
+        if len(recent) < 4:
+            return
+
+        # Build summary prompt
+        convo_text = []
+        for entry in recent:
+            role = "User" if entry.get("role") == "user" else "Jarvis"
+            convo_text.append(f"{role}: {entry.get('text', '')}")
+
+        summary_prompt = (
+            "Summarize this conversation in 2-3 sentences. "
+            "Focus on key topics discussed, decisions made, and any "
+            "facts the user shared about themselves. Be concise.\n\n"
+            + "\n".join(convo_text)
+        )
+
+        summary = _provider.ask(summary_prompt, max_length=200)
+        if summary:
+            try:
+                from core.memory import get_memory
+                mem = get_memory()
+                mem.save_conversation_summary(summary, _session_id)
+                log.info("Conversation summarized and stored: %s...", summary[:60])
+            except Exception as e:
+                log.debug("Summary storage failed: %s", e)
+
+    except Exception as e:
+        log.debug("Conversation summarization failed: %s", e)
+
+
 def get_conversation_history() -> list[dict]:
     """Get the conversation history for display/persistence."""
     return list(_conversation_history)
+
+
+def get_session_id() -> str:
+    """Get the current conversation session ID."""
+    return _session_id
 
 
 def reset_conversation() -> None:
@@ -495,4 +733,5 @@ def reset_conversation() -> None:
     _conversation_history.clear()
     if _gemini_provider and hasattr(_gemini_provider, 'reset_chat'):
         _gemini_provider.reset_chat()
+    _new_session()
     log.info("AI conversation reset")

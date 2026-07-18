@@ -4,6 +4,13 @@ core/executor.py — Unified command router for J.A.R.V.I.S.
 Routes voice/text commands through all handler modules in priority order,
 with memory-aware AI fallback for unrecognized commands.
 
+Features:
+- Multi-command chaining ("open Chrome and play music")
+- Implicit intent handling ("thanks", "who are you", "good morning")
+- Follow-up detection → routes back to AI with context
+- Execution timing (logged for diagnostics)
+- Conversational response for social intents (not robotic)
+
 Command priority:
 1. Exit / Quit / Sleep Mode
 2. Listen mode switching
@@ -36,6 +43,8 @@ from core.brain import (
     list_routines, save_brain,
 )
 from core.logger import get_logger, log_command
+from core.event_bus import bus, Events
+from core.state_machine import machine, States
 
 log = get_logger("core.executor")
 
@@ -44,11 +53,28 @@ _command_log: list[dict] = []
 _log_lock = threading.Lock()
 _MAX_LOG_SIZE = 50
 
+# Execution stats
+_total_executed: int = 0
+_total_exec_time_ms: int = 0
+_last_exec_time_ms: int = 0
+
 
 def get_command_log() -> list[dict]:
     """Get the recent command log for HUD display."""
     with _log_lock:
         return list(_command_log)
+
+
+def get_exec_stats() -> dict:
+    """Get execution statistics for diagnostics."""
+    return {
+        "total_commands": _total_executed,
+        "total_exec_time_ms": _total_exec_time_ms,
+        "last_exec_time_ms": _last_exec_time_ms,
+        "avg_exec_time_ms": (
+            _total_exec_time_ms // _total_executed if _total_executed > 0 else 0
+        ),
+    }
 
 
 def _add_log_entry(command: str, response: str) -> None:
@@ -65,9 +91,75 @@ def _add_log_entry(command: str, response: str) -> None:
     log_command(command, response)
 
 
+def _time_greeting() -> str:
+    """Generate a time-appropriate greeting response."""
+    hour = datetime.now().hour
+    if hour < 6:
+        return "Burning the midnight oil, sir? All systems at your disposal."
+    elif hour < 12:
+        return "Good morning, sir. Systems are online and ready."
+    elif hour < 17:
+        return "Good afternoon, sir. How may I assist?"
+    elif hour < 21:
+        return "Good evening, sir. What can I do for you?"
+    else:
+        return "Good evening, sir. Standing by."
+
+
+def _handle_implicit_intent(intent) -> tuple[bool, str]:
+    """
+    Handle implicit intents (social/casual phrases).
+
+    Returns:
+        (handled, response_message)
+    """
+    action = intent.action
+
+    if action == "acknowledge":
+        return True, intent.response or "At your service, sir."
+
+    if action == "cancel":
+        return True, intent.response or "Understood. Standing by."
+
+    if action == "dismiss":
+        return True, intent.response or "Very well, sir."
+
+    if action == "identity":
+        return True, intent.response or "I am J.A.R.V.I.S., at your service."
+
+    if action == "status_self":
+        return True, intent.response or "All systems operational, sir."
+
+    if action in ("greet_morning", "greet_evening", "greet_night"):
+        return True, _time_greeting()
+
+    if action == "welcome_back":
+        return True, "Welcome back, sir. All systems nominal."
+
+    if action == "capabilities":
+        return True, (
+            "I can manage your applications, control media, search the web, "
+            "handle files, run diagnostics, remember information, and hold "
+            "conversations, sir. Just say the word."
+        )
+
+    if action == "suggest":
+        return True, "Perhaps a quick web search, or shall I run a system diagnostic, sir?"
+
+    if action == "sleep":
+        from core.listener import enter_sleep
+        enter_sleep()
+        return True, "Dimming systems. Rest well, sir."
+
+    return False, ""
+
+
 def execute(command: str) -> str | None:
     """
     Main command executor. Routes through all command modules in priority order.
+
+    Handles multi-command chaining, implicit intents, follow-ups,
+    and execution timing. Emits pipeline stage events for HUD.
 
     Args:
         command: The voice/text command to execute.
@@ -75,10 +167,87 @@ def execute(command: str) -> str | None:
     Returns:
         "exit" to quit the application, None for normal continuation.
     """
+    global _total_executed, _total_exec_time_ms, _last_exec_time_ms
+
     if not command:
         return None
 
+    exec_start = time.time()
     cmd = command.lower().strip()
+
+    # Emit command received event
+    bus.emit(Events.COMMAND_RECEIVED, command=cmd, source="voice")
+
+    # ─── Multi-command chaining ──────────────────────────
+    from core.intent import split_multi_command
+    parts = split_multi_command(cmd)
+    if len(parts) > 1:
+        log.info("Multi-command: executing %d parts", len(parts))
+        for i, part in enumerate(parts):
+            result = _execute_single(part.strip())
+            if result == "exit":
+                return "exit"
+            if i < len(parts) - 1:
+                time.sleep(0.3)  # Brief pause between commands
+
+        duration_ms = int((time.time() - exec_start) * 1000)
+        _total_executed += 1
+        _last_exec_time_ms = duration_ms
+        _total_exec_time_ms += duration_ms
+        bus.emit(Events.COMMAND_COMPLETED, command=cmd, response="Multi-command done",
+                 duration_ms=duration_ms, success=True)
+        machine.set_state(States.IDLE)
+        return None
+
+    result = _execute_single(cmd)
+
+    duration_ms = int((time.time() - exec_start) * 1000)
+    _total_executed += 1
+    _last_exec_time_ms = duration_ms
+    _total_exec_time_ms += duration_ms
+
+    # Emit completion
+    bus.emit(Events.COMMAND_COMPLETED, command=cmd,
+             response=_command_log[-1].get("response", "") if _command_log else "",
+             duration_ms=duration_ms, success=(result != "exit"))
+    machine.set_state(States.IDLE)
+
+    return result
+
+
+def _execute_single(cmd: str) -> str | None:
+    """Execute a single command (after multi-command splitting)."""
+    if not cmd:
+        return None
+
+    # ─── Stage: Understanding ───────────────────────────
+    machine.set_state(States.UNDERSTANDING)
+    bus.emit(Events.COMMAND_STAGE, stage="understanding", label="Understanding...")
+
+    # ─── Follow-up detection ────────────────────────────
+    from core.ai_engine import is_followup, is_cancellation, is_available, ask
+    if is_cancellation(cmd):
+        speak("Understood. Standing by, sir.")
+        _add_log_entry(cmd, "Cancelled")
+        return None
+
+    if is_followup(cmd) and is_available():
+        log.info("Follow-up detected: '%s' — routing to AI with context", cmd)
+        response = ask(cmd)
+        speak(response)
+        truncated = response[:80] + "..." if len(response) > 80 else response
+        _add_log_entry(cmd, truncated)
+        return None
+
+    # ─── Implicit intent detection ──────────────────────
+    from core.intent import check_implicit_intent
+    implicit = check_implicit_intent(cmd)
+    if implicit:
+        handled, msg = _handle_implicit_intent(implicit)
+        if handled:
+            speak(msg)
+            _add_log_entry(cmd, msg)
+            return None
 
     # ─── Intent normalization ────────────────────────────
     # Transform natural phrases into standard commands
@@ -92,6 +261,9 @@ def execute(command: str) -> str | None:
     log.info("Processing: %s", cmd)
     increment_usage(cmd)
 
+    # ─── Stage: Planning ────────────────────────────────
+    machine.set_state(States.THINKING)
+    bus.emit(Events.COMMAND_STAGE, stage="planning", label="Planning...")
 
     # ─── Safety gate: confirm destructive actions ────────
     from config.config import CONFIRM_DESTRUCTIVE
@@ -103,6 +275,10 @@ def execute(command: str) -> str | None:
                 return None
 
     # ─── 1. Exit / Quit ─────────────────────────────────
+    # ─── Stage: Executing ───────────────────────────────
+    machine.set_state(States.EXECUTING)
+    bus.emit(Events.COMMAND_STAGE, stage="executing", label=f"Executing: {cmd[:30]}")
+
     if cmd in ("exit", "quit", "goodbye", "bye", "shut down jarvis",
                "shutdown jarvis", "close jarvis", "stop"):
         speak("Shutting down all systems. Goodbye, sir.")
@@ -340,6 +516,22 @@ def execute(command: str) -> str | None:
         _add_log_entry(cmd, msg)
         return None
 
+    # ─── 14d. OS control & file intelligence ─────────────
+    from commands.os_control import handle_os_control_command
+    handled, ok, msg = handle_os_control_command(cmd)
+    if handled:
+        speak(msg)
+        _add_log_entry(cmd, msg)
+        return None
+
+    # ─── 14e. Research & knowledge ───────────────────────
+    from commands.research import handle_research_command
+    handled, ok, msg = handle_research_command(cmd)
+    if handled:
+        speak(msg)
+        _add_log_entry(cmd, msg)
+        return None
+
     # ─── 15. Web search fallback ────────────────────────
     from commands.web import handle_web_command
     handled, ok, msg = handle_web_command(cmd)
@@ -377,7 +569,6 @@ def execute(command: str) -> str | None:
 
     # ─── 18. AI conversation fallback ───────────────────
     try:
-        from core.ai_engine import is_available, ask
         if is_available():
             response = ask(command)
             speak(response)

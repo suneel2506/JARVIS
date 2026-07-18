@@ -109,6 +109,84 @@ class HUDCanvas(QWidget):
         self._font_state = QFont("Consolas", 12, QFont.Bold)
         self._font_footer = QFont("Consolas", 7)
 
+        # ─── Event Bus Connection ────────────────────
+        self.current_stage = "idle"
+        self.current_stage_label = "Ready"
+        try:
+            from core.event_bus import bus, Events
+            bus.on(Events.STATE_CHANGED, self._on_bus_state_changed)
+            bus.on(Events.COMMAND_STAGE, self._on_bus_command_stage)
+            bus.on(Events.COMMAND_COMPLETED, self._on_bus_command_completed)
+            bus.on(Events.NOTIFICATION, self._on_bus_notification)
+            bus.on(Events.SYSTEM_STATS, self._on_bus_system_stats)
+            bus.on(Events.MEMORY_UPDATED, self._on_bus_memory_updated)
+        except Exception as e:
+            log.warning("HUD Event Bus subscription failed: %s", e)
+
+    def _on_bus_state_changed(self, event, state, prev_state, error_msg=""):
+        self.state = state
+        self.waveform_active = state in ("listening", "active_listening")
+        status_map = {
+            "idle": "SYSTEM ONLINE — STANDBY",
+            "listening": "● ACTIVE LISTENING",
+            "understanding": "⚡ UNDERSTANDING COMMAND",
+            "thinking": "🧠 PROCESSING INTENT",
+            "executing": "⚙ EXECUTING COMMAND",
+            "speaking": "◆ RESPONDING",
+            "monitoring": "○ MONITORING SYSTEMS",
+            "error": "⚠ SYSTEM ERROR",
+        }
+        self._status_text = status_map.get(state, "SYSTEM ONLINE")
+        self.update()
+
+    def _on_bus_command_stage(self, event, stage, label):
+        self.current_stage = stage
+        self.current_stage_label = label
+        self.update()
+
+    def _on_bus_command_completed(self, event, command, response, duration_ms, success):
+        # Format command log entry
+        from datetime import datetime
+        entry = {
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "command": command,
+            "response": f"{response} ({duration_ms}ms)" if response else f"({duration_ms}ms)"
+        }
+        self.command_log.append(entry)
+        if len(self.command_log) > 50:
+            self.command_log.pop(0)
+        self.current_stage = "idle"
+        self.current_stage_label = "Ready"
+        self.radar_blips.append({"angle": random.randint(0, 359), "time": time.time()})
+        self.update()
+
+    def _on_bus_notification(self, event, title, message, level="info"):
+        self.notifications.append({
+            "message": f"{title}: {message}",
+            "color": {
+                "info": PRIMARY,
+                "success": ACCENT_GREEN,
+                "warning": "#ff9000",
+                "error": "#ff0040",
+            }.get(level, PRIMARY),
+            "time": time.time(),
+            "duration": 5.0
+        })
+        self.update()
+
+    def _on_bus_system_stats(self, event, stats):
+        self.stats = stats
+        self.update()
+
+    def _on_bus_memory_updated(self, event, category, key):
+        self.notifications.append({
+            "message": f"Memory Updated: {category}/{key}",
+            "color": ACCENT_GREEN,
+            "time": time.time(),
+            "duration": 4.0
+        })
+        self.update()
+
     def _init_particles(self, count: int):
         """Initialize floating holographic particles."""
         for _ in range(count):
@@ -126,12 +204,16 @@ class HUDCanvas(QWidget):
         """Update all animation state. Called by timer."""
         # Arc reactor rotation speeds
         speed_table = {
-            "listening":        (3.0, -4.5, 6.0, 4.0),
-            "active_listening": (3.0, -4.5, 6.0, 4.0),
-            "processing":       (5.0, -7.0, 9.0, 6.0),
-            "speaking":         (2.0, -3.0, 4.0, 5.0),
+            "idle":             (0.5, -0.3, 0.2, 2.0),
+            "listening":        (3.0, -4.5, 6.0, 5.0),
+            "understanding":    (6.0, -8.0, 10.0, 7.0),
+            "thinking":         (8.0, -10.0, 12.0, 8.0),
+            "executing":        (10.0, -5.0, 15.0, 10.0),
+            "speaking":         (2.0, -3.0, 4.0, 4.0),
+            "monitoring":       (0.2, -0.1, 0.1, 1.0),
+            "error":            (15.0, -15.0, 20.0, 15.0),
         }
-        s1, s2, s3, sp = speed_table.get(self.state, (0.5, -0.3, 0.2, 3.0))
+        s1, s2, s3, sp = speed_table.get(self.state, (0.5, -0.3, 0.2, 2.0))
 
         self.angle1 += s1 * dt * 60
         self.angle2 += s2 * dt * 60
@@ -181,27 +263,30 @@ class HUDCanvas(QWidget):
         # Panels
         panel_w = int(w * 0.20)
         panel_h = h - 140
-        self._draw_system_panel(painter, 20, 110, panel_w, panel_h)
-        self._draw_log_panel(painter, w - panel_w - 20, 110, panel_w, panel_h)
+        self._draw_activity_panel(painter, 20, 110, panel_w, panel_h)
+        self._draw_intelligence_panel(painter, w - panel_w - 20, 110, panel_w, panel_h)
+
+        # Bottom panel strip
+        self._draw_bottom_panel(painter, panel_w + 40, h - 145, w - (panel_w * 2) - 80, 80)
 
         # Top bar
         self._draw_top_bar(painter, w)
 
         # Arc reactor
         reactor_r = min(140, h // 5)
-        self._draw_arc_reactor(painter, cx, cy - 30, reactor_r)
+        self._draw_arc_reactor(painter, cx, cy - 40, reactor_r)
 
-        # Waveform
-        self._draw_waveform(painter, cx, cy - 30 + reactor_r + 90, min(450, w // 3))
+        # Waveform (just above bottom panel)
+        self._draw_waveform(painter, cx, h - 170, min(500, w // 3))
 
-        # Radar
-        self._draw_radar(painter, 140, h - 120, 60)
+        # Radar (bottom left corner of center area)
+        self._draw_radar(painter, panel_w + 100, h - 230, 50)
 
         # Notifications
         self._draw_notifications(painter, w)
 
-        # Conversation
-        self._draw_conversation(painter, cx, cy - 30 + reactor_r + 140)
+        # Conversation (positioned below state text and above waveform)
+        self._draw_conversation(painter, cx, cy - 40 + reactor_r + 80)
 
         # Footer
         painter.setPen(_qc(TEXT_DIM))
@@ -281,37 +366,64 @@ class HUDCanvas(QWidget):
     # ─── Arc Reactor ─────────────────────────────────────
 
     def _draw_arc_reactor(self, p: QPainter, cx: int, cy: int, r: int):
-        # Outer decorative ring
-        self._draw_dot_ring(p, cx, cy, r + 20, 16, self.angle1, REACTOR_OUTER)
-
-        # Outer segmented ring
-        self._draw_seg_ring(p, cx, cy, r, r + 10, REACTOR_RING, 12, self.angle1, gap=15)
-
-        # Middle tick ring
-        self._draw_tick_ring(p, cx, cy, r - 10, r - 2, PRIMARY_DIM, 36, self.angle2)
-
-        # Inner segmented ring
-        self._draw_seg_ring(p, cx, cy, r - 30, r - 18, SECONDARY, 8, self.angle3, gap=20)
-
-        # Inner tick ring
-        self._draw_tick_ring(p, cx, cy, r - 45, r - 35, PRIMARY_DIM, 24, -self.angle3)
-
-        # Core glow
+        # Pulse calculation
         pulse_val = (math.sin(self.pulse) + 1) / 2
 
-        if self.state in ("listening", "active_listening"):
+        # ─── Dynamic Ring & Core Colors ───
+        if self.state == "listening":
             core_color = lerp_color(REACTOR_CORE, "#ffffff", pulse_val * 0.5)
             core_r = int(r * 0.22 + pulse_val * 8)
-        elif self.state == "processing":
-            core_color = lerp_color(REACTOR_CORE, "#ffaa00", pulse_val * 0.7)
+            ring_color = PRIMARY
+        elif self.state == "understanding":
+            core_color = lerp_color(REACTOR_CORE, "#ffffff", pulse_val * 0.6)
+            core_r = int(r * 0.22 + pulse_val * 10)
+            ring_color = SECONDARY
+        elif self.state == "thinking":
+            core_color = lerp_color("#ffaa00", "#ff6600", pulse_val * 0.7)
             core_r = int(r * 0.22 + pulse_val * 12)
+            ring_color = "#ffaa00"
+        elif self.state == "executing":
+            core_color = lerp_color(ACCENT_GREEN, "#ffffff", pulse_val * 0.5)
+            core_r = int(r * 0.24 + pulse_val * 6)
+            ring_color = ACCENT_GREEN
         elif self.state == "speaking":
-            beat = (math.sin(self.pulse * 2) + 1) / 2
-            core_color = lerp_color(REACTOR_CORE, "#e0ffff", beat * 0.6)
-            core_r = int(r * 0.22 + beat * 10)
-        else:
+            # Wave-synchronized core sizing based on audio amplitude
+            avg_level = sum(self.waveform_levels) / len(self.waveform_levels) if self.waveform_levels else 0.0
+            core_color = lerp_color(REACTOR_CORE, "#e0ffff", pulse_val * 0.6)
+            core_r = int(r * 0.22 + avg_level * 35)
+            ring_color = PRIMARY
+        elif self.state == "error":
+            core_color = lerp_color(ACCENT_RED, "#ff8080", pulse_val * 0.6)
+            core_r = int(r * 0.22 + pulse_val * 15)
+            ring_color = ACCENT_RED
+        elif self.state == "monitoring":
+            core_color = lerp_color(PRIMARY_DARK, PRIMARY_DIM, pulse_val * 0.3)
+            core_r = int(r * 0.18 + pulse_val * 2)
+            ring_color = PRIMARY_DARK
+        else:  # idle / standby
             core_color = lerp_color(REACTOR_CORE, PRIMARY, pulse_val * 0.3)
             core_r = int(r * 0.20 + pulse_val * 4)
+            ring_color = REACTOR_RING
+
+        # Determine structural ring colors based on state
+        outer_dot_color = REACTOR_OUTER if self.state != "error" else ACCENT_RED
+        mid_tick_color = PRIMARY_DIM if self.state != "error" else ACCENT_RED
+        inner_seg_color = ring_color
+
+        # Outer decorative ring
+        self._draw_dot_ring(p, cx, cy, r + 20, 16, self.angle1, outer_dot_color)
+
+        # Outer segmented ring
+        self._draw_seg_ring(p, cx, cy, r, r + 10, ring_color, 12, self.angle1, gap=15)
+
+        # Middle tick ring
+        self._draw_tick_ring(p, cx, cy, r - 10, r - 2, mid_tick_color, 36, self.angle2)
+
+        # Inner segmented ring
+        self._draw_seg_ring(p, cx, cy, r - 30, r - 18, inner_seg_color, 8, self.angle3, gap=20)
+
+        # Inner tick ring
+        self._draw_tick_ring(p, cx, cy, r - 45, r - 35, mid_tick_color, 24, -self.angle3)
 
         # Outer glow halos
         for i in range(3):
@@ -327,28 +439,44 @@ class HUDCanvas(QWidget):
         p.drawEllipse(QPointF(cx, cy), core_r, core_r)
 
         # Center dot
-        dot_r = core_r // 3
+        dot_r = max(2, core_r // 3)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(255, 255, 255))
         p.drawEllipse(QPointF(cx, cy), dot_r, dot_r)
 
         # State text
         state_text = {
-            "idle": "STANDBY", "wake_listening": "STANDBY",
-            "listening": "● LISTENING", "active_listening": "● LISTENING",
-            "processing": "⚡ PROCESSING", "speaking": "◆ SPEAKING",
-            "sleeping": "○ SLEEP MODE",
+            "idle": "STANDBY",
+            "listening": "● LISTENING",
+            "understanding": "⚡ UNDERSTANDING",
+            "thinking": "🧠 THINKING",
+            "executing": "⚙ EXECUTING",
+            "speaking": "◆ SPEAKING",
+            "monitoring": "○ MONITORING",
+            "error": "⚠ SYSTEM ERROR",
         }.get(self.state, "STANDBY")
 
         state_color = {
-            "idle": PRIMARY_DIM, "wake_listening": PRIMARY_DIM,
-            "listening": PRIMARY, "active_listening": PRIMARY,
-            "processing": "#ffaa00", "speaking": REACTOR_CORE,
+            "idle": PRIMARY_DIM,
+            "listening": PRIMARY,
+            "understanding": SECONDARY,
+            "thinking": "#ffaa00",
+            "executing": ACCENT_GREEN,
+            "speaking": REACTOR_CORE,
+            "monitoring": PRIMARY_DIM,
+            "error": ACCENT_RED,
         }.get(self.state, PRIMARY_DIM)
 
         p.setPen(_qc(state_color))
         p.setFont(self._font_state)
-        p.drawText(QRectF(cx - 100, cy + r + 30, 200, 25), Qt.AlignCenter, state_text)
+        p.drawText(QRectF(cx - 150, cy + r + 30, 300, 25), Qt.AlignCenter, state_text)
+
+        # Command stage label subtext
+        stage_label = getattr(self, "current_stage_label", "")
+        if stage_label and stage_label != "Ready" and self.state != "idle":
+            p.setPen(_qc(TEXT_DIM))
+            p.setFont(self._font_small)
+            p.drawText(QRectF(cx - 200, cy + r + 55, 400, 20), Qt.AlignCenter, stage_label)
 
     def _draw_dot_ring(self, p, cx, cy, r, count, angle, color):
         p.setPen(Qt.NoPen)
@@ -447,7 +575,7 @@ class HUDCanvas(QWidget):
 
     # ─── System Panel (Left) ─────────────────────────────
 
-    def _draw_system_panel(self, p: QPainter, x: int, y: int, w: int, h: int):
+    def _draw_activity_panel(self, p: QPainter, x: int, y: int, w: int, h: int):
         # Panel background
         p.setPen(QPen(_qc(BORDER), 1))
         p.setBrush(_qc(BG_PANEL, 200))
@@ -456,12 +584,142 @@ class HUDCanvas(QWidget):
         # Title
         p.setPen(_qc(PRIMARY))
         p.setFont(self._font_title)
-        p.drawText(QRectF(x, y + 8, w, 20), Qt.AlignCenter, "SYSTEM DIAGNOSTICS")
+        p.drawText(QRectF(x, y + 8, w, 20), Qt.AlignCenter, "ACTIVITY CENTER")
 
         p.setPen(QPen(_qc(BORDER), 1))
         p.drawLine(x + 10, y + 32, x + w - 10, y + 32)
 
-        # Meters
+        # ─── Section 1: Recent Commands ───
+        sy = y + 45
+        p.setPen(_qc(PRIMARY))
+        p.setFont(QFont("Consolas", 8, QFont.Bold))
+        p.drawText(x + 15, sy, "RECENT COMMANDS")
+        sy += 15
+
+        p.setFont(self._font_small)
+        # Get last 5 commands
+        recent = self.command_log[-5:] if self.command_log else []
+        if not recent:
+            p.setPen(_qc(TEXT_DIM))
+            p.drawText(x + 15, sy, "No recent commands")
+            sy += 20
+        else:
+            for entry in recent:
+                cmd = entry.get("command", "")
+                ts = entry.get("time", "")
+                if len(cmd) > 22:
+                    cmd = cmd[:19] + "..."
+                p.setPen(_qc(TEXT_DIM))
+                p.drawText(x + 15, sy, ts)
+                p.setPen(_qc(SECONDARY))
+                p.drawText(x + 85, sy, f"» {cmd}")
+                sy += 16
+
+        # ─── Section 2: Task Queue / Workflow ───
+        sy += 10
+        p.setPen(QPen(_qc(BORDER), 1))
+        p.drawLine(x + 10, sy, x + w - 10, sy)
+        sy += 10
+
+        p.setPen(_qc(PRIMARY))
+        p.setFont(QFont("Consolas", 8, QFont.Bold))
+        p.drawText(x + 15, sy, "TASK QUEUE & WORKFLOW")
+        sy += 18
+
+        # Display current active stage
+        stage_label = getattr(self, "current_stage_label", "")
+        if stage_label:
+            p.setPen(_qc(ACCENT_GREEN))
+            p.setFont(self._font_small)
+            p.drawText(x + 15, sy, f"★ Active: {stage_label[:22]}")
+            sy += 18
+        else:
+            p.setPen(_qc(TEXT_DIM))
+            p.setFont(self._font_small)
+            p.drawText(x + 15, sy, "★ Active: Idle")
+            sy += 18
+
+        # Static active systems
+        p.setPen(_qc(TEXT_DIM))
+        p.drawText(x + 15, sy, "⚙ Monitoring: Battery, CPU, RAM")
+        sy += 16
+        p.drawText(x + 15, sy, "⚙ Listening: Hey Jarvis (Vosk)")
+        sy += 18
+
+        # ─── Section 3: Reminders & Calendar ───
+        p.setPen(QPen(_qc(BORDER), 1))
+        p.drawLine(x + 10, sy, x + w - 10, sy)
+        sy += 10
+
+        p.setPen(_qc(PRIMARY))
+        p.setFont(QFont("Consolas", 8, QFont.Bold))
+        p.drawText(x + 15, sy, "UPCOMING REMINDERS")
+        sy += 18
+
+        # Get schedules from brain
+        try:
+            from core.brain import get_schedules
+            schedules = get_schedules()[:3]
+        except Exception:
+            schedules = []
+
+        p.setFont(self._font_small)
+        if not schedules:
+            p.setPen(_qc(TEXT_DIM))
+            p.drawText(x + 15, sy, "No upcoming reminders")
+            sy += 20
+        else:
+            for sched in schedules:
+                t = sched.get("time", "")
+                r_name = sched.get("routine", "")
+                if len(r_name) > 16:
+                    r_name = r_name[:13] + "..."
+                p.setPen(_qc(TEXT_DIM))
+                p.drawText(x + 15, sy, t)
+                p.setPen(_qc(TEXT))
+                p.drawText(x + 80, sy, r_name)
+                sy += 16
+
+        # ─── Section 4: Notifications List ───
+        sy += 10
+        p.setPen(QPen(_qc(BORDER), 1))
+        p.drawLine(x + 10, sy, x + w - 10, sy)
+        sy += 10
+
+        p.setPen(_qc(PRIMARY))
+        p.setFont(QFont("Consolas", 8, QFont.Bold))
+        p.drawText(x + 15, sy, "NOTIFICATIONS")
+        sy += 18
+
+        p.setFont(self._font_small)
+        notifs = list(self.notifications)[-3:]
+        if not notifs:
+            p.setPen(_qc(TEXT_DIM))
+            p.drawText(x + 15, sy, "No notifications")
+        else:
+            for notif in notifs:
+                msg = notif.get("message", "")
+                if len(msg) > 24:
+                    msg = msg[:21] + "..."
+                p.setPen(_qc(notif.get("color", PRIMARY)))
+                p.drawText(x + 15, sy, f"▸ {msg}")
+                sy += 16
+
+    def _draw_intelligence_panel(self, p: QPainter, x: int, y: int, w: int, h: int):
+        # Panel background
+        p.setPen(QPen(_qc(BORDER), 1))
+        p.setBrush(_qc(BG_PANEL, 200))
+        p.drawRect(x, y, w, h)
+
+        # Title
+        p.setPen(_qc(PRIMARY))
+        p.setFont(self._font_title)
+        p.drawText(QRectF(x, y + 8, w, 20), Qt.AlignCenter, "SYSTEM INTELLIGENCE")
+
+        p.setPen(QPen(_qc(BORDER), 1))
+        p.drawLine(x + 10, y + 32, x + w - 10, y + 32)
+
+        # ─── Labeled Meters ───
         cpu = self.stats.get("cpu_percent", 0)
         ram = self.stats.get("ram_percent", 0)
         gpu = self.stats.get("gpu_load", 0)
@@ -469,49 +727,205 @@ class HUDCanvas(QWidget):
         disk = self.stats.get("disk_percent", 0)
 
         self._draw_meter(p, x + 15, y + 50, w - 30, "CPU", cpu)
-        self._draw_meter(p, x + 15, y + 95, w - 30, "RAM", ram)
-        self._draw_meter(p, x + 15, y + 140, w - 30, "GPU", gpu)
-        self._draw_meter(p, x + 15, y + 185, w - 30, "BATTERY", bat)
-        self._draw_meter(p, x + 15, y + 230, w - 30, "DISK", disk)
+        self._draw_meter(p, x + 15, y + 90, w - 30, "RAM", ram)
+        self._draw_meter(p, x + 15, y + 130, w - 30, "GPU", gpu)
+        self._draw_meter(p, x + 15, y + 170, w - 30, "BATTERY", bat)
+        self._draw_meter(p, x + 15, y + 210, w - 30, "DISK", disk)
 
-        # Battery charging
+        # Battery charging status
         if self.stats.get("battery_plugged", False):
             p.setPen(_qc(ACCENT_GREEN))
             p.setFont(self._font_main)
-            p.drawText(x + w - 25, y + 200, "⚡")
+            p.drawText(x + w - 25, y + 182, "⚡")
 
-        # Network section
-        sy = y + 275
+        # ─── Network Status ───
+        sy = y + 235
         p.setPen(QPen(_qc(BORDER), 1))
         p.drawLine(x + 10, sy, x + w - 10, sy)
+        sy += 5
 
         p.setPen(_qc(PRIMARY))
-        p.setFont(QFont("Consolas", 9, QFont.Bold))
-        p.drawText(QRectF(x, sy + 5, w, 18), Qt.AlignCenter, "NETWORK")
+        p.setFont(QFont("Consolas", 8, QFont.Bold))
+        p.drawText(QRectF(x, sy, w, 18), Qt.AlignCenter, "NETWORK INTELLIGENCE")
+        sy += 20
 
         net = self.stats.get("network_connected", False)
         net_color = ACCENT_GREEN if net else ACCENT_RED
-        net_text = "● CONNECTED" if net else "● OFFLINE"
+        net_text = "ONLINE" if net else "OFFLINE"
 
         p.setPen(_qc(TEXT_DIM))
         p.setFont(self._font_small)
-        p.drawText(x + 15, sy + 35, "STATUS")
+        p.drawText(x + 15, sy, "STATUS")
         p.setPen(_qc(net_color))
         p.setFont(QFont("Consolas", 8, QFont.Bold))
-        p.drawText(QRectF(x + 15, sy + 25, w - 30, 18), Qt.AlignRight, net_text)
+        p.drawText(QRectF(x + 15, sy - 2, w - 30, 18), Qt.AlignRight, net_text)
+        sy += 16
 
-        # Upload / download
-        up = self.stats.get("net_upload", "0 B/s")
-        dn = self.stats.get("net_download", "0 B/s")
+        up = self.stats.get("net_upload_speed", 0.0)
+        dn = self.stats.get("net_download_speed", 0.0)
+        ping = self.stats.get("ping_ms", 0)
+
         p.setPen(_qc(TEXT_DIM))
         p.setFont(self._font_small)
-        p.drawText(x + 15, sy + 55, "↑ UP")
+        p.drawText(x + 15, sy, "PING")
         p.setPen(_qc(TEXT))
-        p.drawText(QRectF(x + 15, sy + 45, w - 30, 18), Qt.AlignRight, str(up))
+        p.drawText(QRectF(x + 15, sy - 2, w - 30, 18), Qt.AlignRight, f"{ping}ms")
+        sy += 16
+
         p.setPen(_qc(TEXT_DIM))
-        p.drawText(x + 15, sy + 75, "↓ DOWN")
+        p.drawText(x + 15, sy, "↑ UPLOAD")
         p.setPen(_qc(TEXT))
-        p.drawText(QRectF(x + 15, sy + 65, w - 30, 18), Qt.AlignRight, str(dn))
+        p.drawText(QRectF(x + 15, sy - 2, w - 30, 18), Qt.AlignRight, f"{up:.1f} Mbps")
+        sy += 16
+
+        p.setPen(_qc(TEXT_DIM))
+        p.drawText(x + 15, sy, "↓ DOWNLOAD")
+        p.setPen(_qc(TEXT))
+        p.drawText(QRectF(x + 15, sy - 2, w - 30, 18), Qt.AlignRight, f"{dn:.1f} Mbps")
+        sy += 20
+
+        # ─── OS Diagnostics (Mic / Speaker / Wake) ───
+        p.setPen(QPen(_qc(BORDER), 1))
+        p.drawLine(x + 10, sy, x + w - 10, sy)
+        sy += 5
+
+        p.setPen(_qc(PRIMARY))
+        p.setFont(QFont("Consolas", 8, QFont.Bold))
+        p.drawText(QRectF(x, sy, w, 18), Qt.AlignCenter, "HARDWARE & OS STATUS")
+        sy += 20
+
+        # Mic Device
+        mic_dev = self.stats.get("mic_device", "Default")
+        if len(mic_dev) > 18:
+            mic_dev = mic_dev[:15] + "..."
+        p.setPen(_qc(TEXT_DIM))
+        p.setFont(self._font_small)
+        p.drawText(x + 15, sy, "MIC DEVICE")
+        p.setPen(_qc(TEXT))
+        p.drawText(QRectF(x + 15, sy - 2, w - 30, 18), Qt.AlignRight, mic_dev)
+        sy += 16
+
+        # Wake Word
+        wake_status = self.stats.get("wake_word_status", "standby")
+        p.setPen(_qc(TEXT_DIM))
+        p.drawText(x + 15, sy, "WAKE ENGINE")
+        p.setPen(_qc(ACCENT_GREEN if wake_status != "dead" else ACCENT_RED))
+        p.drawText(QRectF(x + 15, sy - 2, w - 30, 18), Qt.AlignRight, "VOSK (ACTIVE)" if wake_status != "dead" else "OFFLINE")
+        sy += 16
+
+        # ─── AI Engine ───
+        p.setPen(QPen(_qc(BORDER), 1))
+        p.drawLine(x + 10, sy, x + w - 10, sy)
+        sy += 5
+
+        p.setPen(_qc(PRIMARY))
+        p.setFont(QFont("Consolas", 8, QFont.Bold))
+        p.drawText(QRectF(x, sy, w, 18), Qt.AlignCenter, "AI CORE")
+        sy += 20
+
+        ai_prov = self.stats.get("ai_status", "Gemini")
+        p.setPen(_qc(TEXT_DIM))
+        p.setFont(self._font_small)
+        p.drawText(x + 15, sy, "PROVIDER")
+        p.setPen(_qc(SECONDARY))
+        p.drawText(QRectF(x + 15, sy - 2, w - 30, 18), Qt.AlignRight, ai_prov)
+        sy += 16
+
+        # Active Model
+        p.setPen(_qc(TEXT_DIM))
+        p.drawText(x + 15, sy, "ACTIVE MODEL")
+        p.setPen(_qc(TEXT))
+        p.drawText(QRectF(x + 15, sy - 2, w - 30, 18), Qt.AlignRight, "gemini-2.0-flash")
+        sy += 16
+
+        # Inference Time
+        ai_lat = self.stats.get("ai_latency_ms", 0)
+        p.setPen(_qc(TEXT_DIM))
+        p.drawText(x + 15, sy, "INFERENCE")
+        p.setPen(_qc(ACCENT_GREEN if ai_lat < 1000 else ACCENT_ORANGE))
+        p.drawText(QRectF(x + 15, sy - 2, w - 30, 18), Qt.AlignRight, f"{ai_lat}ms" if ai_lat else "0ms")
+        sy += 16
+
+        # Memory size
+        mem_stats = getattr(self, "_memory_stats", {})
+        mem_total = mem_stats.get("total_entries", 0)
+        p.setPen(_qc(TEXT_DIM))
+        p.drawText(x + 15, sy, "MEM BANK SIZE")
+        p.setPen(_qc(SECONDARY))
+        p.drawText(QRectF(x + 15, sy - 2, w - 30, 18), Qt.AlignRight, f"{mem_total} entries")
+
+    def _draw_bottom_panel(self, p: QPainter, x: int, y: int, w: int, h: int):
+        # Panel frame
+        p.setPen(QPen(_qc(BORDER), 1))
+        p.setBrush(_qc(BG_PANEL, 150))
+        p.drawRect(x, y, w, h)
+
+        # Draw grid lines inside panel for futuristic look
+        p.setPen(QPen(_qc(GRID, 80), 1))
+        p.drawLine(x + w // 4, y, x + w // 4, y + h)
+        p.drawLine(x + (2 * w) // 4, y, x + (2 * w) // 4, y + h)
+        p.drawLine(x + (3 * w) // 4, y, x + (3 * w) // 4, y + h)
+
+        # ─── Grid Sector 1: Latency ───
+        p.setPen(_qc(TEXT_DIM))
+        p.setFont(self._font_small)
+        p.drawText(QRectF(x + 10, y + 10, w // 4 - 20, 15), Qt.AlignCenter, "RESPONSE TIME")
+        
+        exec_stats = getattr(self, "_exec_stats", {})
+        last_latency = exec_stats.get("last_exec_time_ms", 0)
+        p.setPen(_qc(PRIMARY))
+        p.setFont(QFont("Consolas", 14, QFont.Bold))
+        p.drawText(QRectF(x + 10, y + 30, w // 4 - 20, 25), Qt.AlignCenter, f"{last_latency}ms")
+
+        # ─── Grid Sector 2: Pipeline State ───
+        p.setPen(_qc(TEXT_DIM))
+        p.setFont(self._font_small)
+        p.drawText(QRectF(x + w // 4 + 10, y + 10, w // 4 - 20, 15), Qt.AlignCenter, "PIPELINE STAGE")
+        
+        stage = getattr(self, "current_stage", "idle").upper()
+        stage_color = {
+            "IDLE": PRIMARY_DIM, "LISTENING": PRIMARY,
+            "UNDERSTANDING": SECONDARY, "THINKING": "#ffaa00",
+            "EXECUTING": ACCENT_GREEN, "SPEAKING": REACTOR_CORE,
+            "ERROR": ACCENT_RED,
+        }.get(stage, PRIMARY_DIM)
+        p.setPen(_qc(stage_color))
+        p.setFont(QFont("Consolas", 11, QFont.Bold))
+        p.drawText(QRectF(x + w // 4 + 10, y + 32, w // 4 - 20, 20), Qt.AlignCenter, stage)
+
+        # ─── Grid Sector 3: Current Automation ───
+        p.setPen(_qc(TEXT_DIM))
+        p.setFont(self._font_small)
+        p.drawText(QRectF(x + 2 * w // 4 + 10, y + 10, w // 4 - 20, 15), Qt.AlignCenter, "CURRENT AUTOMATION")
+        
+        automation_str = "STANDBY"
+        if self.state == "executing":
+            automation_str = "RUNNING HANDLER"
+        elif self.state == "speaking":
+            automation_str = "AUDIO STREAM"
+        p.setPen(_qc(TEXT))
+        p.setFont(QFont("Consolas", 10, QFont.Bold))
+        p.drawText(QRectF(x + 2 * w // 4 + 10, y + 32, w // 4 - 20, 20), Qt.AlignCenter, automation_str)
+
+        # ─── Grid Sector 4: System Health ───
+        p.setPen(_qc(TEXT_DIM))
+        p.setFont(self._font_small)
+        p.drawText(QRectF(x + 3 * w // 4 + 10, y + 10, w // 4 - 20, 15), Qt.AlignCenter, "SYSTEM HEALTH")
+        
+        cpu = self.stats.get("cpu_percent", 0)
+        ram = self.stats.get("ram_percent", 0)
+        health_str = "NOMINAL"
+        health_color = ACCENT_GREEN
+        if cpu > 85 or ram > 85:
+            health_str = "WARNING"
+            health_color = ACCENT_ORANGE
+        elif self.state == "error":
+            health_str = "CRITICAL"
+            health_color = ACCENT_RED
+            
+        p.setPen(_qc(health_color))
+        p.setFont(QFont("Consolas", 12, QFont.Bold))
+        p.drawText(QRectF(x + 3 * w // 4 + 10, y + 32, w // 4 - 20, 20), Qt.AlignCenter, health_str)
 
     def _draw_meter(self, p: QPainter, x: int, y: int, w: int, label: str, value: float):
         """Draw a labeled progress bar meter."""
@@ -543,53 +957,6 @@ class HUDCanvas(QWidget):
             color = PRIMARY
         p.setBrush(_qc(color, 200))
         p.drawRect(x, bar_y, fill_w, bar_h)
-
-    # ─── Log Panel (Right) ───────────────────────────────
-
-    def _draw_log_panel(self, p: QPainter, x: int, y: int, w: int, h: int):
-        p.setPen(QPen(_qc(BORDER), 1))
-        p.setBrush(_qc(BG_PANEL, 200))
-        p.drawRect(x, y, w, h)
-
-        p.setPen(_qc(PRIMARY))
-        p.setFont(self._font_title)
-        p.drawText(QRectF(x, y + 8, w, 20), Qt.AlignCenter, "ACTIVITY LOG")
-
-        p.setPen(QPen(_qc(BORDER), 1))
-        p.drawLine(x + 10, y + 32, x + w - 10, y + 32)
-
-        # Log entries
-        p.setFont(self._font_small)
-        entries = self.command_log[-20:] if self.command_log else []
-        ey = y + 45
-
-        for entry in entries:
-            if ey > y + h - 20:
-                break
-            cmd_text = entry.get("command", "")
-            resp_text = entry.get("response", "")
-            ts = entry.get("time", "")
-
-            if len(cmd_text) > 28:
-                cmd_text = cmd_text[:25] + "..."
-            if len(resp_text) > 28:
-                resp_text = resp_text[:25] + "..."
-
-            # Timestamp
-            p.setPen(_qc(TEXT_DIM))
-            p.drawText(x + 10, ey, ts[-8:] if len(ts) > 8 else ts)
-
-            # Command
-            p.setPen(_qc(SECONDARY))
-            p.drawText(x + 10, ey + 14, f"» {cmd_text}")
-
-            # Response
-            if resp_text:
-                p.setPen(_qc(TEXT_DIM))
-                p.drawText(x + 10, ey + 28, f"  {resp_text}")
-                ey += 45
-            else:
-                ey += 30
 
     # ─── Notifications ───────────────────────────────────
 
@@ -880,6 +1247,14 @@ class JarvisHUD(QMainWindow):
             "text": text,
             "time": time.time(),
         })
+
+    def update_memory_stats(self, stats: dict):
+        """Update memory statistics for the system panel."""
+        self.canvas._memory_stats = stats
+
+    def update_exec_stats(self, stats: dict):
+        """Update execution statistics for the system panel."""
+        self.canvas._exec_stats = stats
 
     # ─── Callbacks ───────────────────────────────────────
 
